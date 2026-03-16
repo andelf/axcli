@@ -1,0 +1,78 @@
+[package]
+name = "axcli"
+version = "0.1.0"
+edition = "2021"
+authors = ["Andelf <andelf@gmail.com>"]
+repository = "https://github.com/andelf/axcli"
+description = "macOS Accessibility API CLI tool — a Playwright/Puppeteer-style CLI for native macOS apps"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["macos", "accessibility", "cli", "automation"]
+categories = ["command-line-utilities", "os::macos-apis"]
+
+[dependencies]
+objc2 = "0.6.4"
+block2 = "0.6.2"
+objc2-core-foundation = { version = "0.3.2", features = ["CFRunLoop", "CFURL"] }
+objc2-foundation = { version = "0.3.2", features = [
+    "NSArray",
+    "NSDictionary",
+    "NSError",
+    "NSString",
+    "NSURL",
+    "NSObject",
+    "NSValue",
+] }
+objc2-app-kit = { version = "0.3.2", features = [
+    "NSRunningApplication",
+    "NSScreen",
+    "NSResponder",
+    "block2",
+] }
+objc2-core-graphics = { version = "0.3.2", features = [
+    "CGImage",
+    "CGGeometry",
+    "CGWindow",
+    "CGWindowLevel",
+    "CGEventTypes",
+    "CGEvent",
+    "CGEventSource",
+    "CGRemoteOperation",
+    "CGError",
+    "CGDirectDisplay",
+    "libc",
+] }
+objc2-application-services = { version = "0.3.2", features = [
+    "HIServices",
+    "AXError",
+    "AXUIElement",
+    "AXAttributeConstants",
+    "AXRoleConstants",
+    "AXActionConstants",
+    "AXValue",
+] }
+objc2-vision = { version = "0.3.2", features = [
+    "VNRecognizeTextRequest",
+    "VNRequestHandler",
+    "VNRequest",
+    "VNObservation",
+    "VNTypes",
+    "objc2-core-graphics",
+] }
+objc2-screen-capture-kit = { version = "0.3.2", features = [
+    "SCShareableContent",
+    "SCScreenshotManager",
+    "SCStream",
+    "block2",
+    "dispatch2",
+    "libc",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+    "objc2-core-media",
+] }
+objc2-image-io = { version = "0.3.2", features = [
+    "CGImageDestination",
+    "objc2-core-graphics",
+] }
+clap = { version = "4", features = ["derive"] }
+regex = "1"
