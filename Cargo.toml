@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Andelf <andelf@gmail.com>"]
 repository = "https://github.com/andelf/axcli"
+homepage = "https://github.com/andelf/axcli"
 description = "macOS Accessibility API CLI tool — a Playwright/Puppeteer-style CLI for native macOS apps"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
