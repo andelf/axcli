@@ -17,7 +17,7 @@ use objc2_screen_capture_kit::{
     SCStreamConfiguration, SCWindow,
 };
 
-extern "C" {
+unsafe extern "C" {
     fn CGDisplayBounds(display: u32) -> CGRect;
     fn CGGetActiveDisplayList(max: u32, displays: *mut u32, count: *mut u32) -> i32;
     fn CGDisplayCopyDisplayMode(display: u32) -> *const std::ffi::c_void;

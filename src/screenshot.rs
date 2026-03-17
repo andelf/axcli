@@ -5,7 +5,7 @@ use objc2_core_foundation::{CFRetained, CFString, CFURL, CFURLPathStyle, CGPoint
 use objc2_core_graphics::{CGImage, CGWindowImageOption, CGWindowListCreateImage, CGWindowListOption};
 use objc2_image_io::CGImageDestination;
 
-extern "C" {
+unsafe extern "C" {
     fn CGMainDisplayID() -> u32;
 }
 
