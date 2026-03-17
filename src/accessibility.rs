@@ -47,9 +47,10 @@ pub fn attr_string_list(element: &AXUIElement, attribute: &str) -> Vec<String> {
     let Some(value) = attr_value(element, attribute) else {
         return Vec::new();
     };
-    // The attribute is a CFArray containing CFString elements.
-    let arr_ptr = value.as_ref() as *const CFType as *const CFArray;
-    let arr = unsafe { &*arr_ptr };
+    // Safely downcast from CFType to CFArray (returns None if it's not actually a CFArray).
+    let Some(arr) = value.downcast_ref::<CFArray>() else {
+        return Vec::new();
+    };
     let count = arr.len();
     let mut result = Vec::with_capacity(count);
     for i in 0..count {
@@ -619,10 +620,11 @@ impl AXNode {
     /// Get the parent element.
     pub fn parent(&self) -> Option<AXNode> {
         let value = attr_value(&self.0, "AXParent")?;
-        // AXParent returns an AXUIElement
+        // Verify the CFType is actually an AXUIElement before retaining.
+        let parent_ref = value.downcast_ref::<AXUIElement>()?;
         let el = unsafe {
             CFRetained::retain(NonNull::new_unchecked(
-                value.as_ref() as *const CFType as *mut AXUIElement,
+                parent_ref as *const AXUIElement as *mut AXUIElement,
             ))
         };
         Some(AXNode::new(el))
@@ -643,7 +645,7 @@ impl AXNode {
         use objc2_application_services::{AXValue, AXValueType};
         use objc2_core_foundation::CGPoint;
         let value = attr_value(&self.0, "AXPosition")?;
-        let ax_val = unsafe { &*(value.as_ref() as *const CFType as *const AXValue) };
+        let ax_val = value.downcast_ref::<AXValue>()?;
         let mut point = CGPoint { x: 0.0, y: 0.0 };
         let ok = unsafe {
             ax_val.value(
@@ -659,7 +661,7 @@ impl AXNode {
         use objc2_application_services::{AXValue, AXValueType};
         use objc2_core_foundation::CGSize;
         let value = attr_value(&self.0, "AXSize")?;
-        let ax_val = unsafe { &*(value.as_ref() as *const CFType as *const AXValue) };
+        let ax_val = value.downcast_ref::<AXValue>()?;
         let mut size = CGSize { width: 0.0, height: 0.0 };
         let ok = unsafe {
             ax_val.value(
@@ -980,7 +982,7 @@ fn element_is_visible(el: &AXUIElement) -> bool {
     use objc2_application_services::{AXValue, AXValueType};
     use objc2_core_foundation::CGSize;
     let Some(value) = attr_value(el, "AXSize") else { return false };
-    let ax_val = unsafe { &*(value.as_ref() as *const CFType as *const AXValue) };
+    let Some(ax_val) = value.downcast_ref::<AXValue>() else { return false };
     let mut size = CGSize { width: 0.0, height: 0.0 };
     let ok = unsafe {
         ax_val.value(
@@ -994,9 +996,7 @@ fn element_is_visible(el: &AXUIElement) -> bool {
 /// Check if an element is the Nth child (0-based) among all its parent's children.
 fn is_nth_child(el: &AXUIElement, n: usize) -> bool {
     let Some(parent_val) = attr_value(el, "AXParent") else { return false };
-    let parent = unsafe {
-        &*(parent_val.as_ref() as *const CFType as *const AXUIElement)
-    };
+    let Some(parent) = parent_val.downcast_ref::<AXUIElement>() else { return false };
     let siblings = children(parent);
     siblings.get(n).is_some_and(|sib| is_same_element(sib, el))
 }
@@ -1237,9 +1237,7 @@ fn element_matches_base_selector(el: &AXUIElement, selector: &str) -> bool {
 fn nth_among_siblings(el: &AXUIElement) -> Option<(String, usize)> {
     let role = attr_string(el, "AXRole")?;
     let parent_val = attr_value(el, "AXParent")?;
-    let parent = unsafe {
-        &*(parent_val.as_ref() as *const CFType as *const AXUIElement)
-    };
+    let parent = parent_val.downcast_ref::<AXUIElement>()?;
     let siblings = children(parent);
     let mut idx = 0;
     for sib in &siblings {
@@ -1283,9 +1281,12 @@ pub fn generate_locator(root: &AXUIElement, target: &AXUIElement) -> String {
             Some(v) => v,
             None => break,
         };
+        let Some(parent_ref) = parent_val.downcast_ref::<AXUIElement>() else {
+            break;
+        };
         let parent = unsafe {
             CFRetained::retain(NonNull::new_unchecked(
-                parent_val.as_ref() as *const CFType as *mut AXUIElement,
+                parent_ref as *const AXUIElement as *mut AXUIElement,
             ))
         };
 

@@ -25,6 +25,7 @@
 //! ```
 
 use crate::accessibility::{attr_string, children, find_all, AXNode, AXQuery};
+use crate::error::AxError;
 use objc2_application_services::AXUIElement;
 use objc2_core_foundation::CFRetained;
 
@@ -304,15 +305,19 @@ impl Locator {
         self.resolve_all().into_iter().next()
     }
 
-    /// Resolve exactly one element. Panics if count != 1.
-    pub fn resolve_one(&self) -> AXNode {
+    /// Resolve exactly one element.
+    ///
+    /// Returns `Err(LocatorNotFound)` if no matches, `Err(LocatorAmbiguous)` if more than one.
+    pub fn resolve_one(&self) -> Result<AXNode, AxError> {
         let results = self.resolve_all();
-        assert!(
-            results.len() == 1,
-            "resolve_one: expected 1 match, got {}",
-            results.len()
-        );
-        results.into_iter().next().unwrap()
+        match results.len() {
+            0 => Err(AxError::LocatorNotFound("Locator matched 0 elements".to_string())),
+            1 => Ok(results.into_iter().next().unwrap()),
+            n => Err(AxError::LocatorAmbiguous {
+                locator: format!("Locator({} steps)", self.steps.len()),
+                count: n,
+            }),
+        }
     }
 
     /// Alias for `resolve_all`.
