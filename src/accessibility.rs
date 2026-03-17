@@ -6,7 +6,7 @@
 use std::ptr::NonNull;
 
 use objc2_application_services::{AXError, AXUIElement};
-use objc2_core_foundation::{CFArray, CFIndex, CFRetained, CFString, CFType};
+use objc2_core_foundation::{CFArray, CFIndex, CFRetained, CFString, CFType, Type};
 
 pub use objc2_application_services::AXIsProcessTrusted;
 
@@ -350,11 +350,7 @@ impl AXQuery {
             }
         }
         if let Some(ref text) = self.has_descendant_text {
-            let node = AXNode(unsafe {
-                CFRetained::retain(NonNull::new_unchecked(
-                    element as *const AXUIElement as *mut AXUIElement,
-                ))
-            });
+            let node = AXNode(element.retain());
             let found = node.texts(15).iter().any(|t| t.contains(text.as_str()));
             if !found {
                 return false;
@@ -376,11 +372,7 @@ impl AXQuery {
             }
         }
         if let Some(pred) = self.predicate {
-            let node = AXNode(unsafe {
-                CFRetained::retain(NonNull::new_unchecked(
-                    element as *const AXUIElement as *mut AXUIElement,
-                ))
-            });
+            let node = AXNode(element.retain());
             if !pred(&node) {
                 return false;
             }

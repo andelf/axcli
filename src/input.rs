@@ -199,8 +199,8 @@ pub fn parse_key_combo(combo: &str) -> (u16, u64) {
         "f1" => 122, "f2" => 120, "f3" => 99, "f4" => 118,
         "f5" => 96, "f6" => 97, "f7" => 98, "f8" => 100,
         "f9" => 101, "f10" => 109, "f11" => 103, "f12" => 111,
-        s if s.len() == 1 => {
-            let ch = s.chars().next().unwrap();
+        s if s.chars().count() == 1 => {
+            let ch = s.chars().next().expect("already verified single char");
             match ch {
                 'a' => 0, 's' => 1, 'd' => 2, 'f' => 3, 'h' => 4,
                 'g' => 5, 'z' => 6, 'x' => 7, 'c' => 8, 'v' => 9,

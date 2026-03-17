@@ -41,8 +41,8 @@ fn get_shareable_content() -> Option<Retained<SCShareableContent>> {
             let _ = tx.send(None);
             return;
         }
-        let retained = unsafe { Retained::retain(content).unwrap() };
-        let _ = tx.send(Some(retained));
+        let retained = unsafe { Retained::retain(content) };
+        let _ = tx.send(retained);
     });
     unsafe {
         SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(
