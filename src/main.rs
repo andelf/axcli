@@ -289,6 +289,9 @@ Known attributes:
         /// Show all matches instead of just the first
         #[arg(long)]
         all: bool,
+        /// Accepted for compatibility with snapshot, but ignored
+        #[arg(long, hide = true, default_value_t = 0)]
+        max_text_len: usize,
     },
     /// List running applications visible to accessibility
     ListApps,
@@ -360,7 +363,7 @@ fn run(cli: Cli) -> Result<(), AxError> {
             Ok(())
         }
         Command::Wait { target } => cmd_wait(&ctx, &target),
-        Command::Get { attr, locator, all } => cmd_get(&ctx, &attr, &locator, all),
+        Command::Get { attr, locator, all, max_text_len: _ } => cmd_get(&ctx, &attr, &locator, all),
         Command::Debug { .. } => unreachable!(),
     }
 }
