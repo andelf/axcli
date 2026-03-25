@@ -19,10 +19,14 @@
 //!   axcli --app Lark wait 500
 //!   axcli --app Lark get AXValue '.SearchInput'
 
+use std::ptr::NonNull;
+use std::ffi::c_void;
+
 use clap::{Parser, Subcommand};
-use objc2_core_foundation::{CGPoint, CGSize, CGRect};
+use objc2_core_foundation::{CGPoint, CGSize, CGRect, CFString, CFRunLoop, kCFRunLoopDefaultMode};
 use objc2_core_graphics::CGImage;
-use axcli::accessibility::{self, AXNode};
+use objc2_application_services::{AXObserver, AXObserverCallback, AXUIElement, AXError as AXErr};
+use axcli::accessibility::{self, AXNode, attr_string};
 use axcli::actions::ExecutionContext;
 use axcli::error::{AxError, exit_code};
 use axcli::{input, screenshot, tree_fmt};
@@ -293,6 +297,17 @@ Known attributes:
         #[arg(long, hide = true, default_value_t = 0)]
         max_text_len: usize,
     },
+    /// Watch for accessibility notifications (daemon mode)
+    ///
+    /// Monitors UI changes in the target app: element creation, destruction,
+    /// layout changes, value changes, focus changes, and more.
+    /// Useful for detecting when element refs become stale.
+    /// Runs until interrupted (Ctrl+C).
+    Watch {
+        /// Output format: text (default) or json
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
     /// List running applications visible to accessibility
     ListApps,
     /// Debug: print current mouse position and screen info
@@ -364,6 +379,7 @@ fn run(cli: Cli) -> Result<(), AxError> {
         }
         Command::Wait { target } => cmd_wait(&ctx, &target),
         Command::Get { attr, locator, all, max_text_len: _ } => cmd_get(&ctx, &attr, &locator, all),
+        Command::Watch { format } => cmd_watch(pid, &ctx.app, &format),
         Command::Debug { .. } => unreachable!(),
     }
 }
@@ -1082,5 +1098,136 @@ fn cmd_get(ctx: &ExecutionContext, attr: &GetAttr, locator: &str, all: bool) -> 
             println!();
         }
     }
+    Ok(())
+}
+
+// --- Watch (daemon mode) ---
+
+/// AXObserver callback — called on every notification.
+unsafe extern "C-unwind" fn watch_callback(
+    _observer: NonNull<AXObserver>,
+    element: NonNull<AXUIElement>,
+    notification: NonNull<CFString>,
+    refcon: *mut c_void,
+) {
+    let json_mode = !refcon.is_null();
+    let notif = unsafe { notification.as_ref() }.to_string();
+    let el = unsafe { element.as_ref() };
+    let role = attr_string(el, "AXRole").unwrap_or_default();
+    let title = attr_string(el, "AXTitle").unwrap_or_default();
+    let desc = attr_string(el, "AXDescription").unwrap_or_default();
+
+    // Classify: does this notification invalidate refs?
+    let stale = matches!(
+        notif.as_str(),
+        "AXUIElementDestroyed" | "AXCreated" | "AXLayoutChanged" | "AXRowCountChanged"
+    );
+
+    if json_mode {
+        let label = if !title.is_empty() { &title } else { &desc };
+        let escaped_label = label.replace('\\', "\\\\").replace('"', "\\\"");
+        let escaped_notif = notif.replace('\\', "\\\\").replace('"', "\\\"");
+        let escaped_role = role.replace('\\', "\\\\").replace('"', "\\\"");
+        println!(
+            r#"{{"notification":"{}","role":"{}","label":"{}","refs_stale":{}}}"#,
+            escaped_notif, escaped_role, escaped_label, stale
+        );
+    } else {
+        let label = if !title.is_empty() {
+            &title
+        } else if !desc.is_empty() {
+            &desc
+        } else {
+            ""
+        };
+        let stale_marker = if stale { " ⚠️  refs stale" } else { "" };
+        let short = if label.len() > 60 {
+            format!("{}...", &label[..57])
+        } else {
+            label.to_string()
+        };
+        eprintln!("{notif} → {role} \"{short}\"{stale_marker}");
+    }
+}
+
+fn cmd_watch(pid: i32, _app: &AXNode, format: &str) -> Result<(), AxError> {
+    let json_mode = format == "json";
+
+    let mut observer_ptr: *mut AXObserver = std::ptr::null_mut();
+    let cb: AXObserverCallback = Some(watch_callback);
+    #[allow(deprecated)]
+    let err = unsafe {
+        objc2_application_services::AXObserverCreate(
+            pid,
+            cb,
+            NonNull::new(&mut observer_ptr as *mut *mut AXObserver).unwrap(),
+        )
+    };
+    if err != AXErr(0) || observer_ptr.is_null() {
+        return Err(AxError::ActionFailed(format!("AXObserverCreate failed: {err:?}")));
+    }
+    let observer = unsafe { &*observer_ptr };
+
+    // The app-level element to observe
+    let ax_app = unsafe { AXUIElement::new_application(pid) };
+
+    // Notifications to monitor
+    let notifications = [
+        "AXUIElementDestroyed",
+        "AXCreated",
+        "AXLayoutChanged",
+        "AXValueChanged",
+        "AXTitleChanged",
+        "AXFocusedUIElementChanged",
+        "AXSelectedChildrenChanged",
+        "AXRowCountChanged",
+        "AXWindowCreated",
+        "AXWindowMoved",
+        "AXWindowResized",
+        "AXMenuOpened",
+        "AXMenuClosed",
+    ];
+
+    let refcon = if json_mode {
+        1usize as *mut c_void
+    } else {
+        std::ptr::null_mut()
+    };
+
+    let mut registered = 0;
+    for notif in &notifications {
+        let cf_notif = CFString::from_str(notif);
+        #[allow(deprecated)]
+        let result = unsafe {
+            objc2_application_services::AXObserverAddNotification(
+                observer,
+                &ax_app,
+                &cf_notif,
+                refcon,
+            )
+        };
+        if result == AXErr(0) {
+            registered += 1;
+        }
+    }
+
+    if registered == 0 {
+        return Err(AxError::ActionFailed("failed to register any notifications".into()));
+    }
+
+    // Add observer to run loop
+    let source = unsafe { observer.run_loop_source() };
+    let run_loop = CFRunLoop::current().expect("no current run loop");
+    unsafe {
+        run_loop.add_source(Some(&source), kCFRunLoopDefaultMode.as_deref());
+    }
+
+    if !json_mode {
+        eprintln!("Watching {registered}/{} notifications (Ctrl+C to stop)...", notifications.len());
+    }
+
+    // Run forever (until Ctrl+C)
+    CFRunLoop::run();
+
     Ok(())
 }

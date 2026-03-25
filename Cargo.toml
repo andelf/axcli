@@ -51,6 +51,7 @@ objc2-application-services = { version = "0.3.2", features = [
     "AXRoleConstants",
     "AXActionConstants",
     "AXValue",
+    "libc",
 ] }
 objc2-vision = { version = "0.3.2", features = [
     "VNRecognizeTextRequest",
