@@ -241,9 +241,7 @@ pub fn press_key_combo(keycode: u16, flags: u64) {
     std::thread::sleep(std::time::Duration::from_millis(20));
     let up = CGEvent::new_keyboard_event(source.as_deref(), keycode, false);
     if let Some(ref ev) = up {
-        if flags != 0 {
-            CGEvent::set_flags(Some(ev), CGEventFlags(flags));
-        }
+        CGEvent::set_flags(Some(ev), CGEventFlags(0));
         CGEvent::post(CGEventTapLocation::HIDEventTap, Some(ev));
     }
 }
