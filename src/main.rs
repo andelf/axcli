@@ -648,6 +648,17 @@ fn cmd_click(ctx: &ExecutionContext, locator: &str) -> Result<(), AxError> {
     let node = resolve_one(ctx, locator)?;
     let role = node.role().unwrap_or_default();
 
+    // Menu extras (status menu icons) must not be activated — doing so
+    // steals focus and dismisses the menu. Just click by coordinates.
+    if node.subrole().as_deref() == Some("AXMenuExtra") {
+        let (cx, cy) = ctx.element_center(&node, false)?;
+        eprintln!("Clicking at ({cx:.0}, {cy:.0})");
+        input::mouse_move(cx, cy);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        input::mouse_click(cx, cy);
+        return Ok(());
+    }
+
     ctx.activate();
 
     if is_menu_role(&role) {
