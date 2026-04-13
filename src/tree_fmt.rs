@@ -31,6 +31,17 @@ pub fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// For AXMenuExtra nodes (status menu icons), return AXRoleDescription as
+/// a display label since they typically lack a title and description.
+fn menu_extra_label(node: &AXNode, title_max: usize) -> Option<String> {
+    let role_desc = accessibility::attr_string(&node.0, "AXRoleDescription").unwrap_or_default();
+    if role_desc.is_empty() {
+        None
+    } else {
+        Some(format!(" \"{}\"", truncate(&role_desc, title_max)))
+    }
+}
+
 /// Configuration and state for tree printing.
 pub struct TreePrinter {
     /// Max text/title/description display length. 0 = no truncation.
@@ -86,6 +97,10 @@ impl TreePrinter {
             s.push_str(&format!(" \"{}\"", truncate(&title, title_max)));
         } else if !desc.is_empty() {
             s.push_str(&format!(" \"{}\"", truncate(&desc, title_max)));
+        } else if node.subrole().as_deref() == Some("AXMenuExtra") {
+            if let Some(label) = menu_extra_label(node, title_max) {
+                s.push_str(&label);
+            }
         }
         s
     }
@@ -166,11 +181,16 @@ impl TreePrinter {
         };
 
         let has_visible_class = dom_classes.iter().any(|c| !c.starts_with('_'));
+        // Menu extras (status menu items on the right side of the menu bar)
+        // often have empty title/desc but are always interactive.
+        let subrole = node.subrole().unwrap_or_default();
+        let is_menu_extra = subrole == "AXMenuExtra";
         let has_identity = !title.is_empty()
             || !desc.is_empty()
             || !value.is_empty()
             || !dom_id.is_empty()
-            || has_visible_class;
+            || has_visible_class
+            || is_menu_extra;
 
         let has_meaningful_actions = actions
             .iter()
@@ -208,6 +228,10 @@ impl TreePrinter {
                     line.push_str(&format!(" \"{}\"", truncate(&title, title_max)));
                 } else if !desc.is_empty() {
                     line.push_str(&format!(" \"{}\"", truncate(&desc, title_max)));
+                } else if is_menu_extra {
+                    if let Some(label) = menu_extra_label(node, title_max) {
+                        line.push_str(&label);
+                    }
                 }
 
                 if is_interactive {

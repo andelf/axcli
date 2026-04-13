@@ -128,17 +128,45 @@ pub fn set_attr_value(element: &AXUIElement, attribute: &str, value: &CFType) ->
 }
 
 /// Get child elements.
+///
+/// For `AXApplication` elements, this also includes `AXExtrasMenuBar`
+/// (the right-side status menu bar), which macOS exposes as a separate
+/// attribute rather than as part of `AXChildren`.
 pub fn children(element: &AXUIElement) -> Vec<CFRetained<AXUIElement>> {
     let value = match attr_value(element, "AXChildren") {
         Some(v) => v,
         None => return Vec::new(),
     };
-    cf_type_as_ax_elements(&value)
+    let mut result = cf_type_as_ax_elements(&value);
+
+    // AXExtrasMenuBar is a standalone attribute on AXApplication, not
+    // included in AXChildren.  We skip the AXRole guard and just attempt
+    // the lookup directly — non-application elements return None cheaply.
+    if let Some(extras) = attr_value(element, "AXExtrasMenuBar") {
+        if let Some(extras_el) = extras.downcast_ref::<AXUIElement>() {
+            let retained = retain_element(extras_el);
+            let already_present = result.iter().any(|existing| is_same_element(existing, &retained));
+            if !already_present {
+                result.push(retained);
+            }
+        }
+    }
+
+    result
 }
 
 // ---------------------------------------------------------------------------
 // CF type conversion helpers (private)
 // ---------------------------------------------------------------------------
+
+/// Retain-clone an `AXUIElement` reference into an owned `CFRetained`.
+fn retain_element(el: &AXUIElement) -> CFRetained<AXUIElement> {
+    unsafe {
+        CFRetained::retain(NonNull::new_unchecked(
+            el as *const AXUIElement as *mut AXUIElement,
+        ))
+    }
+}
 
 fn cf_type_as_ax_elements(value: &CFType) -> Vec<CFRetained<AXUIElement>> {
     let array = match value.downcast_ref::<CFArray>() {
@@ -614,12 +642,7 @@ impl AXNode {
         let value = attr_value(&self.0, "AXParent")?;
         // Verify the CFType is actually an AXUIElement before retaining.
         let parent_ref = value.downcast_ref::<AXUIElement>()?;
-        let el = unsafe {
-            CFRetained::retain(NonNull::new_unchecked(
-                parent_ref as *const AXUIElement as *mut AXUIElement,
-            ))
-        };
-        Some(AXNode::new(el))
+        Some(AXNode::new(retain_element(parent_ref)))
     }
 
     /// List available actions on this element.
@@ -1262,11 +1285,7 @@ pub fn generate_locator(root: &AXUIElement, target: &AXUIElement) -> String {
 
     // Step 2: Try ancestor >> target combinations (up to 5 ancestors)
     let mut best: Option<(u32, String)> = None;
-    let mut current = unsafe {
-        CFRetained::retain(NonNull::new_unchecked(
-            target as *const AXUIElement as *mut AXUIElement,
-        ))
-    };
+    let mut current = retain_element(target);
 
     for _ in 0..5 {
         let parent_val = match attr_value(&current, "AXParent") {
@@ -1276,11 +1295,7 @@ pub fn generate_locator(root: &AXUIElement, target: &AXUIElement) -> String {
         let Some(parent_ref) = parent_val.downcast_ref::<AXUIElement>() else {
             break;
         };
-        let parent = unsafe {
-            CFRetained::retain(NonNull::new_unchecked(
-                parent_ref as *const AXUIElement as *mut AXUIElement,
-            ))
-        };
+        let parent = retain_element(parent_ref);
 
         // Don't go above root
         if is_same_element(&parent, root) {
