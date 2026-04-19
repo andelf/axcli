@@ -163,10 +163,12 @@ enum ClickStrategy {
     /// Activate the app, then `CGEventPost(HIDEventTap)` at element center.
     /// Default.  Works on everything reachable on screen but steals focus.
     Cg,
-    /// `CGEventPostToPid` tagged with the target CGWindowID.  No activation
-    /// and no focus steal, but **does not reach standard AppKit controls**
-    /// (see docs/research/background-click.md 附录 A.2).  Kept for non-Cocoa
-    /// targets (Flash, certain self-drawn SwiftUI/Metal demos, some overlays).
+    /// `CGEventPostToPid` with the SWaveAX recipe (NSEvent factory +
+    /// `CGEventSetWindowLocation` + Command-flag signal).  Delivers the click
+    /// to the target window without activation or focus steal.  Verified on
+    /// native AppKit apps (Calculator, TextEdit).  **Does not reach Electron
+    /// / Chromium content** — Lark, VSCode, Slack etc. filter the event at
+    /// the renderer IPC boundary; use `ax` or `cg` for those.
     CgPid,
 }
 
@@ -203,10 +205,11 @@ enum Command {
         /// Click strategy.  `cg` (default) activates the app and posts a
         /// global CGEvent at element center — universally works but steals
         /// focus.  `ax` uses AXPress via Accessibility IPC: background-safe,
-        /// no focus steal, but fails if the element doesn't expose AXPress.
-        /// `cg-pid` posts via CGEventPostToPid; experimental — confirmed
-        /// ineffective against standard AppKit controls, useful only for
-        /// non-Cocoa targets.  See docs/research/background-click.md.
+        /// no focus steal, fails if the element doesn't expose AXPress.
+        /// `cg-pid` delivers the click directly to the target window via
+        /// `CGEventPostToPid` with no activation and no focus steal —
+        /// works on native AppKit apps (Calculator, TextEdit) but not on
+        /// Electron/Chromium content.  See docs/research/background-click.md.
         #[arg(long, value_enum, default_value_t = ClickStrategy::Cg)]
         strategy: ClickStrategy,
     },
@@ -713,8 +716,19 @@ fn cmd_click(ctx: &ExecutionContext, locator: &str, strategy: &ClickStrategy) ->
                 }
             };
             let (cx, cy) = ctx.element_center(&node, false)?;
-            eprintln!("cg-pid click pid={} wid={} at ({cx:.0}, {cy:.0})", ctx.pid, wid);
-            input::mouse_click_bg(ctx.pid, wid, cx, cy);
+            // Window-local coordinates: walk up to the owning AXWindow for
+            // its origin, then subtract.  Required by the CGEventSetWindowLocation
+            // path — AppKit needs local coords to hit-test to the right view.
+            let (wx, wy) = find_owning_window(&node)
+                .and_then(|w| w.position())
+                .unwrap_or((0.0, 0.0));
+            let screen = CGPoint::new(cx, cy);
+            let local = CGPoint::new(cx - wx, cy - wy);
+            eprintln!(
+                "cg-pid click pid={} wid={} screen=({cx:.0},{cy:.0}) local=({:.0},{:.0})",
+                ctx.pid, wid, local.x, local.y,
+            );
+            input::mouse_click_bg(ctx.pid, wid, screen, local);
             Ok(())
         }
         ClickStrategy::Cg => {

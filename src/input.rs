@@ -1,12 +1,49 @@
 //! Input simulation: mouse, keyboard, and app activation via CGEvent.
 
-use objc2_app_kit::NSRunningApplication;
+use std::ffi::c_void;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicI64, Ordering};
+
+use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSEventType, NSRunningApplication};
 use objc2_core_foundation::CGPoint;
 use objc2_core_graphics::{
     CGAssociateMouseAndMouseCursorPosition, CGEvent, CGEventField, CGEventFlags, CGEventSource,
     CGEventSourceStateID, CGEventTapLocation, CGEventType, CGMouseButton, CGScrollEventUnit,
     CGWarpMouseCursorPosition,
 };
+use objc2_foundation::NSPoint;
+
+// ---------------------------------------------------------------------------
+// Private CoreGraphics: CGEventSetWindowLocation
+// ---------------------------------------------------------------------------
+//
+// The event carries both a screen-space location (via CGEventCreateMouseEvent)
+// and a window-local location that AppKit's `-[NSWindow sendEvent:]` uses to
+// route to the right view.  The window-local setter is not in the public SDK.
+// It's resolved at runtime via dlsym(RTLD_DEFAULT, "CGEventSetWindowLocation").
+// Stable symbol since at least 10.10; used by the original SWaveAXRaceDemoApp
+// reverse-engineering work (https://github.com/Lakr233/bgclick-rev-skill).
+
+type CGEventSetWindowLocationFn = unsafe extern "C" fn(event: *const c_void, point: CGPoint);
+
+const RTLD_DEFAULT: *mut c_void = -2isize as *mut c_void;
+
+unsafe extern "C" {
+    fn dlsym(handle: *mut c_void, symbol: *const i8) -> *mut c_void;
+}
+
+fn cg_event_set_window_location() -> Option<CGEventSetWindowLocationFn> {
+    static CACHED: OnceLock<Option<CGEventSetWindowLocationFn>> = OnceLock::new();
+    *CACHED.get_or_init(|| unsafe {
+        let name = c"CGEventSetWindowLocation";
+        let ptr = dlsym(RTLD_DEFAULT, name.as_ptr());
+        if ptr.is_null() {
+            None
+        } else {
+            Some(std::mem::transmute::<*mut c_void, CGEventSetWindowLocationFn>(ptr))
+        }
+    })
+}
 
 /// Bring an application to the foreground by PID.
 pub fn activate_app(pid: i32) {
@@ -90,32 +127,69 @@ pub fn mouse_click(x: f64, y: f64) {
     }
 }
 
-/// Post a left-click to the target process via `CGEventPostToPid`, tagging
-/// the event with the target window ID (Hammerspoon `hs.eventtap` recipe).
-///
-/// **Empirical status on macOS 14.x** (see `docs/research/background-click.md`
-/// 附录 A): this path **does not deliver mouse events to standard AppKit apps**.
-/// `CGEventPostToPid` bypasses WindowServer's hit-test, and AppKit's
-/// `-[NSWindow sendEvent:]` has no valid routing target, so the event is
-/// silently dropped.  Confirmed failing on Calculator and TextEdit; the same
-/// event payload delivers correctly when posted via `CGEventPost(HIDEventTap)`.
-///
-/// Retained as an experimental option for non-Cocoa targets (Flash, certain
-/// self-drawn SwiftUI/Metal demos, some game overlays) where the receiver
-/// doesn't rely on AppKit mouse routing.  For normal AppKit controls prefer
-/// `strategy=ax` (AXPress) or `strategy=cg` (activate + global post).
-///
-/// No cursor movement is performed.  Requires Accessibility permission.
-pub fn mouse_click_bg(pid: i32, window_id: u32, x: f64, y: f64) {
-    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState);
-    let point = CGPoint { x, y };
-    let wid = window_id as i64;
+/// Check whether an app (by pid) is currently active.
+fn app_is_active(pid: i32) -> bool {
+    NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+        .map_or(false, |a| a.isActive())
+}
 
-    let tag = |ev: &CGEvent| {
-        // Fields 91/92 are Apple-public (10.15+) and name the window that
-        // should receive the event.  Subtype 3 is the community-named
-        // "window-targeted" value (kCGEventMouseSubtypeWindowServer) used by
-        // hs.eventtap; harmless when the receiver ignores it.
+/// Monotonic event number for synthesized NSEvents.
+fn next_event_number() -> i64 {
+    static COUNTER: AtomicI64 = AtomicI64::new(1);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Build a synthetic mouse event via `+[NSEvent mouseEventWithType:...]` and
+/// extract its `CGEventRef`.  NSEvent auto-fills fields 0/1/2/41/43/44/50/51/55/59/102/108
+/// that plain `CGEventCreateMouseEvent` leaves blank — notably field 55
+/// (window number), which AppKit relies on for routing.
+fn make_mouse_event_via_nsevent(
+    ty: NSEventType,
+    screen: CGPoint,
+    modifier_flags: NSEventModifierFlags,
+    window_number: isize,
+) -> Option<objc2::rc::Retained<CGEvent>> {
+    let ns_point = NSPoint::new(screen.x, screen.y);
+    let timestamp = objc2_foundation::NSProcessInfo::processInfo().systemUptime();
+    let ns_ev = NSEvent::mouseEventWithType_location_modifierFlags_timestamp_windowNumber_context_eventNumber_clickCount_pressure(
+        ty,
+        ns_point,
+        modifier_flags,
+        timestamp,
+        window_number,
+        None,
+        next_event_number() as isize,
+        1,
+        1.0,
+    )?;
+    ns_ev.CGEvent()
+}
+
+/// Post a left-click to the target process via `CGEventPostToPid`, using the
+/// full SWaveAX reverse-engineered recipe:
+///
+/// 1. Event is built via `+[NSEvent mouseEventWithType:...]` so the 12
+///    auto-fill fields (including field 55 = windowNumber) are populated.
+/// 2. Window ID fields 91/92, subtype 7, button number 3 are explicitly set.
+/// 3. Window-local coordinates written via private `CGEventSetWindowLocation`
+///    (dlsym'd from `CoreGraphics`).
+/// 4. When the target app is inactive, modifier flags carry
+///    `kCGEventFlagMaskCommand` (`0x00100000`) as a WindowServer-bypass signal.
+/// 5. Delivered via `CGEventPostToPid`, no focus steal.
+///
+/// Reference: <https://github.com/Lakr233/bgclick-rev-skill>.  No cursor
+/// movement is performed.  Requires Accessibility permission.
+pub fn mouse_click_bg(pid: i32, window_id: u32, screen: CGPoint, local: CGPoint) {
+    let wid = window_id as i64;
+    let set_win_loc = cg_event_set_window_location();
+    let inactive = !app_is_active(pid);
+    let flags = if inactive {
+        NSEventModifierFlags::Command
+    } else {
+        NSEventModifierFlags::empty()
+    };
+
+    let tag = |ev: &CGEvent, button_idx: i64| {
         CGEvent::set_integer_value_field(Some(ev), CGEventField::MouseEventWindowUnderMousePointer, wid);
         CGEvent::set_integer_value_field(
             Some(ev),
@@ -123,28 +197,20 @@ pub fn mouse_click_bg(pid: i32, window_id: u32, x: f64, y: f64) {
             wid,
         );
         CGEvent::set_integer_value_field(Some(ev), CGEventField::MouseEventSubtype, 3);
+        CGEvent::set_integer_value_field(Some(ev), CGEventField::MouseEventButtonNumber, button_idx);
+        if let Some(fptr) = set_win_loc {
+            unsafe { fptr(ev as *const CGEvent as *const c_void, local); }
+        }
     };
 
-    let down = CGEvent::new_mouse_event(
-        source.as_deref(),
-        CGEventType::LeftMouseDown,
-        point,
-        CGMouseButton::Left,
-    );
-    if let Some(ref ev) = down {
-        tag(ev);
-        CGEvent::post_to_pid(pid, Some(ev));
+    if let Some(down) = make_mouse_event_via_nsevent(NSEventType::LeftMouseDown, screen, flags, wid as isize) {
+        tag(&down, 0);
+        CGEvent::post_to_pid(pid, Some(&down));
     }
     std::thread::sleep(std::time::Duration::from_millis(50));
-    let up = CGEvent::new_mouse_event(
-        source.as_deref(),
-        CGEventType::LeftMouseUp,
-        point,
-        CGMouseButton::Left,
-    );
-    if let Some(ref ev) = up {
-        tag(ev);
-        CGEvent::post_to_pid(pid, Some(ev));
+    if let Some(up) = make_mouse_event_via_nsevent(NSEventType::LeftMouseUp, screen, flags, wid as isize) {
+        tag(&up, 0);
+        CGEvent::post_to_pid(pid, Some(&up));
     }
 }
 

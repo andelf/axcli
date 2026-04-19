@@ -28,6 +28,8 @@ objc2-app-kit = { version = "0.3.2", features = [
     "NSRunningApplication",
     "NSScreen",
     "NSResponder",
+    "NSEvent",
+    "NSGraphicsContext",
     "block2",
 ] }
 objc2-core-graphics = { version = "0.3.2", features = [
