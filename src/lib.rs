@@ -1,5 +1,6 @@
 pub mod accessibility;
 pub mod actions;
+pub mod app_kind;
 pub mod error;
 pub mod input;
 pub mod locator;
