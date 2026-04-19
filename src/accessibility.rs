@@ -10,6 +10,15 @@ use objc2_core_foundation::{CFArray, CFIndex, CFRetained, CFString, CFType, Type
 
 pub use objc2_application_services::AXIsProcessTrusted;
 
+// Private AX API: `_AXUIElementGetWindow` returns the CGWindowID of the window
+// containing the given element.  Has been stable since at least 10.10 and is
+// used by yabai, Rectangle, AeroSpace, metamove.  Not part of Apple's public
+// SDK — if it ever disappears, we fall back to frame matching.
+#[link(name = "ApplicationServices", kind = "framework")]
+unsafe extern "C" {
+    fn _AXUIElementGetWindow(element: &AXUIElement, window_id: *mut u32) -> AXError;
+}
+
 // ---------------------------------------------------------------------------
 // Low-level convenience functions
 // ---------------------------------------------------------------------------
@@ -17,6 +26,18 @@ pub use objc2_application_services::AXIsProcessTrusted;
 /// Check if the current process is a trusted accessibility client.
 pub fn is_trusted() -> bool {
     unsafe { AXIsProcessTrusted() }
+}
+
+/// Return the CGWindowID of the window that contains `element`, via the
+/// private `_AXUIElementGetWindow` API.  Returns `None` on failure.
+pub fn window_id_for_element(element: &AXUIElement) -> Option<u32> {
+    let mut wid: u32 = 0;
+    let err = unsafe { _AXUIElementGetWindow(element, &mut wid as *mut u32) };
+    if err == AXError(0) && wid != 0 {
+        Some(wid)
+    } else {
+        None
+    }
 }
 
 /// Get a raw attribute value from an element.
@@ -697,6 +718,14 @@ impl AXNode {
         let cf_str = CFString::from_str(text);
         let cf_type: &CFType = cf_str.as_ref();
         set_attr_value(&self.0, "AXValue", cf_type)
+    }
+
+    /// Return the CGWindowID of the window that contains this element.
+    ///
+    /// Uses the private `_AXUIElementGetWindow` API.  Returns `None` if the
+    /// element is not associated with a window (e.g. the app root).
+    pub fn window_id(&self) -> Option<u32> {
+        window_id_for_element(&self.0)
     }
 
     /// Set AXFocused on this element.

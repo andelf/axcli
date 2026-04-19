@@ -90,6 +90,64 @@ pub fn mouse_click(x: f64, y: f64) {
     }
 }
 
+/// Post a left-click to the target process via `CGEventPostToPid`, tagging
+/// the event with the target window ID (Hammerspoon `hs.eventtap` recipe).
+///
+/// **Empirical status on macOS 14.x** (see `docs/research/background-click.md`
+/// 附录 A): this path **does not deliver mouse events to standard AppKit apps**.
+/// `CGEventPostToPid` bypasses WindowServer's hit-test, and AppKit's
+/// `-[NSWindow sendEvent:]` has no valid routing target, so the event is
+/// silently dropped.  Confirmed failing on Calculator and TextEdit; the same
+/// event payload delivers correctly when posted via `CGEventPost(HIDEventTap)`.
+///
+/// Retained as an experimental option for non-Cocoa targets (Flash, certain
+/// self-drawn SwiftUI/Metal demos, some game overlays) where the receiver
+/// doesn't rely on AppKit mouse routing.  For normal AppKit controls prefer
+/// `strategy=ax` (AXPress) or `strategy=cg` (activate + global post).
+///
+/// No cursor movement is performed.  Requires Accessibility permission.
+pub fn mouse_click_bg(pid: i32, window_id: u32, x: f64, y: f64) {
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState);
+    let point = CGPoint { x, y };
+    let wid = window_id as i64;
+
+    let tag = |ev: &CGEvent| {
+        // Fields 91/92 are Apple-public (10.15+) and name the window that
+        // should receive the event.  Subtype 3 is the community-named
+        // "window-targeted" value (kCGEventMouseSubtypeWindowServer) used by
+        // hs.eventtap; harmless when the receiver ignores it.
+        CGEvent::set_integer_value_field(Some(ev), CGEventField::MouseEventWindowUnderMousePointer, wid);
+        CGEvent::set_integer_value_field(
+            Some(ev),
+            CGEventField::MouseEventWindowUnderMousePointerThatCanHandleThisEvent,
+            wid,
+        );
+        CGEvent::set_integer_value_field(Some(ev), CGEventField::MouseEventSubtype, 3);
+    };
+
+    let down = CGEvent::new_mouse_event(
+        source.as_deref(),
+        CGEventType::LeftMouseDown,
+        point,
+        CGMouseButton::Left,
+    );
+    if let Some(ref ev) = down {
+        tag(ev);
+        CGEvent::post_to_pid(pid, Some(ev));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let up = CGEvent::new_mouse_event(
+        source.as_deref(),
+        CGEventType::LeftMouseUp,
+        point,
+        CGMouseButton::Left,
+    );
+    if let Some(ref ev) = up {
+        tag(ev);
+        CGEvent::post_to_pid(pid, Some(ev));
+    }
+}
+
 /// Double left-click at (x, y) screen coordinates.
 pub fn mouse_dblclick(x: f64, y: f64) {
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState);
@@ -243,6 +301,33 @@ pub fn press_key_combo(keycode: u16, flags: u64) {
     if let Some(ref ev) = up {
         CGEvent::set_flags(Some(ev), CGEventFlags(0));
         CGEvent::post(CGEventTapLocation::HIDEventTap, Some(ev));
+    }
+}
+
+/// Press a key combo, delivered directly to a specific pid via
+/// `CGEventPostToPid`.
+///
+/// Empirically verified on macOS 14.x against Calculator and TextEdit with
+/// Finder kept frontmost — keys landed on the target's first responder
+/// without activation or focus steal.  See `docs/research/background-click.md`
+/// 附录 A.3 for data and A.4 for the architectural reason (keyboard events
+/// route via AppKit's first-responder chain and don't depend on
+/// WindowServer hit-testing, unlike mouse events).
+pub fn press_key_combo_bg(pid: i32, keycode: u16, flags: u64) {
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState);
+
+    let down = CGEvent::new_keyboard_event(source.as_deref(), keycode, true);
+    if let Some(ref ev) = down {
+        if flags != 0 {
+            CGEvent::set_flags(Some(ev), CGEventFlags(flags));
+        }
+        CGEvent::post_to_pid(pid, Some(ev));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let up = CGEvent::new_keyboard_event(source.as_deref(), keycode, false);
+    if let Some(ref ev) = up {
+        CGEvent::set_flags(Some(ev), CGEventFlags(0));
+        CGEvent::post_to_pid(pid, Some(ev));
     }
 }
 

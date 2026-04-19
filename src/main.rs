@@ -22,7 +22,7 @@
 use std::ptr::NonNull;
 use std::ffi::c_void;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use objc2_core_foundation::{CGPoint, CGSize, CGRect, CFString, CFRunLoop, kCFRunLoopDefaultMode};
 use objc2_core_graphics::CGImage;
 use objc2_application_services::{AXObserver, AXObserverCallback, AXUIElement, AXError as AXErr};
@@ -143,6 +143,33 @@ impl std::str::FromStr for GetAttr {
     }
 }
 
+/// Keyboard post strategy.
+#[derive(Clone, Debug, ValueEnum)]
+enum PressStrategy {
+    /// Global `CGEventPost(HIDEventTap)`. Activates the app first. Default.
+    Hid,
+    /// `CGEventPostToPid` — delivers to the target process's first responder
+    /// without activation or focus steal.  Empirically works on AppKit apps
+    /// (Calculator, TextEdit).  Recommended for background input.
+    Pid,
+}
+
+/// Click dispatch strategy.
+#[derive(Clone, Debug, ValueEnum)]
+enum ClickStrategy {
+    /// AXPress via the Accessibility API.  Background-safe, no focus steal.
+    /// Fails if the element doesn't expose AXPress (e.g. custom canvases).
+    Ax,
+    /// Activate the app, then `CGEventPost(HIDEventTap)` at element center.
+    /// Default.  Works on everything reachable on screen but steals focus.
+    Cg,
+    /// `CGEventPostToPid` tagged with the target CGWindowID.  No activation
+    /// and no focus steal, but **does not reach standard AppKit controls**
+    /// (see docs/research/background-click.md 附录 A.2).  Kept for non-Cocoa
+    /// targets (Flash, certain self-drawn SwiftUI/Metal demos, some overlays).
+    CgPid,
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Print accessibility tree (shows first match by default, use --all for all)
@@ -173,6 +200,15 @@ enum Command {
     /// For off-screen elements, call `scroll-to` first.
     Click {
         locator: String,
+        /// Click strategy.  `cg` (default) activates the app and posts a
+        /// global CGEvent at element center — universally works but steals
+        /// focus.  `ax` uses AXPress via Accessibility IPC: background-safe,
+        /// no focus steal, but fails if the element doesn't expose AXPress.
+        /// `cg-pid` posts via CGEventPostToPid; experimental — confirmed
+        /// ineffective against standard AppKit controls, useful only for
+        /// non-Cocoa targets.  See docs/research/background-click.md.
+        #[arg(long, value_enum, default_value_t = ClickStrategy::Cg)]
+        strategy: ClickStrategy,
     },
     /// Double-click element
     Dblclick {
@@ -193,8 +229,18 @@ enum Command {
         text: String,
     },
     /// Press key combo (Enter, Control+a, Command+Shift+v)
+    ///
+    /// `--strategy pid` delivers the key to the target app's first responder
+    /// via CGEventPostToPid — no activation, no focus steal.  Confirmed
+    /// working on AppKit apps (Calculator, TextEdit).  See
+    /// docs/research/background-click.md 附录 A.3.
     Press {
         key: String,
+        /// Post strategy.  `hid` (default): global `CGEventPost(HIDEventTap)`,
+        /// activates the target first.  `pid`: `CGEventPostToPid`, delivers
+        /// to the target process in the background without focus steal.
+        #[arg(long, value_enum, default_value_t = PressStrategy::Hid)]
+        strategy: PressStrategy,
     },
     /// Move mouse to element center
     ///
@@ -359,11 +405,11 @@ fn run(cli: Cli) -> Result<(), AxError> {
         Command::Snapshot { locator, depth, all, max_text_len, simplify } => {
             cmd_snapshot(&ctx, locator.as_deref(), depth, all, max_text_len, simplify)
         }
-        Command::Click { locator } => cmd_click(&ctx, &locator),
+        Command::Click { locator, strategy } => cmd_click(&ctx, &locator, &strategy),
         Command::Dblclick { locator } => cmd_dblclick(&ctx, &locator),
         Command::Input { locator, text } => cmd_input(&ctx, &locator, &text),
         Command::Fill { locator, text } => cmd_fill(&ctx, &locator, &text),
-        Command::Press { key } => cmd_press(&ctx, &key),
+        Command::Press { key, strategy } => cmd_press(&ctx, &key, &strategy),
         Command::Hover { locator } => cmd_hover(&ctx, &locator),
         Command::Focus { locator } => cmd_focus(&ctx, &locator),
         Command::ScrollTo { locator } => cmd_scroll_to(&ctx, &locator),
@@ -644,36 +690,62 @@ fn cmd_snapshot(ctx: &ExecutionContext, locator: Option<&str>, depth: usize, all
     Ok(())
 }
 
-fn cmd_click(ctx: &ExecutionContext, locator: &str) -> Result<(), AxError> {
+fn cmd_click(ctx: &ExecutionContext, locator: &str, strategy: &ClickStrategy) -> Result<(), AxError> {
     let node = resolve_one(ctx, locator)?;
     let role = node.role().unwrap_or_default();
 
-    // Menu extras (status menu icons) must not be activated — doing so
-    // steals focus and dismisses the menu. Just click by coordinates.
-    if node.subrole().as_deref() == Some("AXMenuExtra") {
-        let (cx, cy) = ctx.element_center(&node, false)?;
-        eprintln!("Clicking at ({cx:.0}, {cy:.0})");
-        input::mouse_move(cx, cy);
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        input::mouse_click(cx, cy);
-        return Ok(());
-    }
-
-    ctx.activate();
-
-    if is_menu_role(&role) {
-        eprintln!("Performing AXPress on {role}");
-        if !accessibility::perform_action(&node.0, "AXPress") {
-            return Err(AxError::ActionFailed("AXPress".to_string()));
+    match strategy {
+        ClickStrategy::Ax => {
+            eprintln!("Performing AXPress on {role}");
+            if !accessibility::perform_action(&node.0, "AXPress") {
+                return Err(AxError::ActionFailed("AXPress".to_string()));
+            }
+            Ok(())
         }
-    } else {
-        let (cx, cy) = ctx.element_center(&node, false)?;
-        eprintln!("Clicking at ({cx:.0}, {cy:.0})");
-        input::mouse_move(cx, cy);
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        input::mouse_click(cx, cy);
+        ClickStrategy::CgPid => {
+            let wid = match node.window_id() {
+                Some(w) => w,
+                None => {
+                    eprintln!("debug: _AXUIElementGetWindow returned no CGWindowID for this element");
+                    return Err(AxError::ActionFailed(
+                        "could not find the window that owns this element".to_string(),
+                    ));
+                }
+            };
+            let (cx, cy) = ctx.element_center(&node, false)?;
+            eprintln!("cg-pid click pid={} wid={} at ({cx:.0}, {cy:.0})", ctx.pid, wid);
+            input::mouse_click_bg(ctx.pid, wid, cx, cy);
+            Ok(())
+        }
+        ClickStrategy::Cg => {
+            // Menu extras (status menu icons) must not be activated — doing so
+            // steals focus and dismisses the menu. Just click by coordinates.
+            if node.subrole().as_deref() == Some("AXMenuExtra") {
+                let (cx, cy) = ctx.element_center(&node, false)?;
+                eprintln!("Clicking at ({cx:.0}, {cy:.0})");
+                input::mouse_move(cx, cy);
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                input::mouse_click(cx, cy);
+                return Ok(());
+            }
+
+            ctx.activate();
+
+            if is_menu_role(&role) {
+                eprintln!("Performing AXPress on {role}");
+                if !accessibility::perform_action(&node.0, "AXPress") {
+                    return Err(AxError::ActionFailed("AXPress".to_string()));
+                }
+            } else {
+                let (cx, cy) = ctx.element_center(&node, false)?;
+                eprintln!("Clicking at ({cx:.0}, {cy:.0})");
+                input::mouse_move(cx, cy);
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                input::mouse_click(cx, cy);
+            }
+            Ok(())
+        }
     }
-    Ok(())
 }
 
 fn cmd_dblclick(ctx: &ExecutionContext, locator: &str) -> Result<(), AxError> {
@@ -719,12 +791,19 @@ fn cmd_fill(ctx: &ExecutionContext, locator: &str, text: &str) -> Result<(), AxE
     Ok(())
 }
 
-fn cmd_press(ctx: &ExecutionContext, key: &str) -> Result<(), AxError> {
-    ctx.activate();
-
+fn cmd_press(ctx: &ExecutionContext, key: &str, strategy: &PressStrategy) -> Result<(), AxError> {
     let (keycode, flags) = input::parse_key_combo(key);
-    eprintln!("Pressing: {key} (keycode={keycode}, flags=0x{flags:x})");
-    input::press_key_combo(keycode, flags);
+    match strategy {
+        PressStrategy::Hid => {
+            ctx.activate();
+            eprintln!("Pressing: {key} (keycode={keycode}, flags=0x{flags:x}) via HID");
+            input::press_key_combo(keycode, flags);
+        }
+        PressStrategy::Pid => {
+            eprintln!("Pressing: {key} (keycode={keycode}, flags=0x{flags:x}) via post_to_pid pid={}", ctx.pid);
+            input::press_key_combo_bg(ctx.pid, keycode, flags);
+        }
+    }
     Ok(())
 }
 
