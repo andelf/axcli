@@ -359,9 +359,13 @@ SkyLight 路径在"**激活特定进程+特定窗口但不抢整个 App 焦点**
 
 ----
 
-## 附录 A：最终实证结果（2026-04-19，macOS 14.x）
+## 附录 A：早期 PoC 实证结果（2026-04-19，macOS 14.x）
 
-> 本节是 PoC 收尾后的**确定结论**。上文的假设（特别是 §5、§9 里对 `isKeyWindow` 门控的推测）部分被实验推翻，请以本节为准。
+> ⚠️ **本附录已被 [`background-click-journey.md`](background-click-journey.md) 取代**。
+> 当时结论（"cg-pid 对主流 AppKit 无效"）基于 **不完整的配方** —— 缺了
+> NSEvent 工厂构造 + 私有 `CGEventSetWindowLocation`。完整 SWaveAX 配方落地
+> 后 Calculator / TextEdit 都能后台点击。保留本附录作为研究过程中的"被推翻
+> 的假设"记录，最新结论请看 journey 文档。
 
 ### A.1 测试方法
 
