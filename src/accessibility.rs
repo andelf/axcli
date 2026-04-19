@@ -743,8 +743,14 @@ impl AXNode {
 // App discovery
 // ---------------------------------------------------------------------------
 
-/// Find a running application by name (partial match on bundle ID or localized name).
-/// Returns `(pid, localized_name)` if found.
+/// Find a running application by name.  Returns `(pid, localized_name)`.
+///
+/// Match priority (best → worst).  The first non-empty tier wins; if that
+/// tier has multiple entries we print a hint and pick the first one.
+///   1. Exact localized name (case-insensitive)
+///   2. Exact bundle ID     (case-insensitive)
+///   3. Substring of localized name
+///   4. Substring of bundle ID
 pub fn find_app_by_name(_mtm: objc2::MainThreadMarker, name: &str) -> Option<(i32, String)> {
     use objc2_app_kit::NSRunningApplication;
 
@@ -754,23 +760,49 @@ pub fn find_app_by_name(_mtm: objc2::MainThreadMarker, name: &str) -> Option<(i3
     let apps: objc2::rc::Retained<objc2_foundation::NSArray<NSRunningApplication>> =
         unsafe { objc2::msg_send![&workspace, runningApplications] };
 
-    let name_lower = name.to_lowercase();
+    let needle = name.to_lowercase();
+    // Tier: 0=exact-name, 1=exact-bundle, 2=substr-name, 3=substr-bundle.
+    let mut tiered: [Vec<(i32, String, String)>; 4] = Default::default();
     for app in apps.iter() {
-        let bundle = app
-            .bundleIdentifier()
-            .map(|b| b.to_string())
-            .unwrap_or_default();
-        let localized = app
-            .localizedName()
-            .map(|n| n.to_string())
-            .unwrap_or_default();
-        if bundle.to_lowercase().contains(&name_lower)
-            || localized.to_lowercase().contains(&name_lower)
-        {
-            return Some((app.processIdentifier(), localized));
+        let bundle = app.bundleIdentifier().map(|b| b.to_string()).unwrap_or_default();
+        let localized = app.localizedName().map(|n| n.to_string()).unwrap_or_default();
+        let ll = localized.to_lowercase();
+        let bl = bundle.to_lowercase();
+        let pid = app.processIdentifier();
+        let tier = if ll == needle {
+            Some(0)
+        } else if bl == needle {
+            Some(1)
+        } else if ll.contains(&needle) {
+            Some(2)
+        } else if bl.contains(&needle) {
+            Some(3)
+        } else {
+            None
+        };
+        if let Some(t) = tier {
+            tiered[t].push((pid, localized, bundle));
         }
     }
-    None
+
+    // First tier with any entry wins.
+    let (tier_idx, bucket) = tiered.iter().enumerate().find(|(_, v)| !v.is_empty())?;
+
+    // Exact tiers (0, 1) are silent even if multiple (unlikely).
+    // Substring tiers (2, 3) print a hint when ambiguous.
+    if tier_idx >= 2 && bucket.len() > 1 {
+        eprintln!(
+            "note: {} apps matched '{}' (tier={}), using first — be more specific to pick:",
+            bucket.len(), name,
+            if tier_idx == 2 { "substring/name" } else { "substring/bundle" },
+        );
+        for (pid, loc, bid) in bucket {
+            eprintln!("  pid={pid:<6}  {loc}  [{bid}]");
+        }
+    }
+
+    let (pid, loc, _) = bucket[0].clone();
+    Some((pid, loc))
 }
 
 // ---------------------------------------------------------------------------
