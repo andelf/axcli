@@ -1642,6 +1642,129 @@ fn collect_matching_inner(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Window visibility check
+// ---------------------------------------------------------------------------
+
+/// Check whether a specific window is visible (not occluded) at a given
+/// screen point.  Uses `CGWindowListCopyWindowInfo` to walk the z-order
+/// (front-to-back).  Returns:
+/// - `Ok(true)` if the target window is the topmost at that point.
+/// - `Ok(false)` if another window covers it (the occluding window's
+///    owner name is printed to stderr).
+/// - `Err` if the target window was not found on screen at all.
+pub fn is_window_visible_at(window_id: u32, x: f64, y: f64) -> Result<bool, String> {
+    use std::ffi::c_void;
+    use objc2_core_foundation::{CFIndex, CFNumber, CFNumberType, CFString as CFS};
+    use objc2_core_graphics::{CGWindowListCopyWindowInfo, CGWindowListOption};
+
+    unsafe extern "C" {
+        fn CFDictionaryGetValue(dict: *const c_void, key: *const c_void) -> *const c_void;
+    }
+
+    let info = CGWindowListCopyWindowInfo(
+        CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements,
+        0,
+    );
+    let Some(info) = info else {
+        return Err("CGWindowListCopyWindowInfo returned null".into());
+    };
+
+    let count = info.len();
+    let target_wid = window_id as i64;
+
+    let key_num = CFS::from_str("kCGWindowNumber");
+    let key_layer = CFS::from_str("kCGWindowLayer");
+    let key_bounds = CFS::from_str("kCGWindowBounds");
+    let key_owner = CFS::from_str("kCGWindowOwnerName");
+
+    for i in 0..count {
+        let dict_ptr = unsafe { info.as_opaque().value_at_index(i as CFIndex) };
+        if dict_ptr.is_null() {
+            continue;
+        }
+
+        let get_val = |key: &CFS| -> *const c_void {
+            unsafe { CFDictionaryGetValue(dict_ptr, key as *const CFS as *const c_void) }
+        };
+
+        // Read window number
+        let wid_ptr = get_val(&key_num);
+        if wid_ptr.is_null() {
+            continue;
+        }
+        let wid_num = unsafe { &*(wid_ptr as *const CFNumber) };
+        let mut wid: i64 = 0;
+        unsafe { wid_num.value(CFNumberType(4), &mut wid as *mut i64 as *mut _); }
+
+        // Read window layer — only consider normal windows (layer 0)
+        let layer_ptr = get_val(&key_layer);
+        let layer: i64 = if !layer_ptr.is_null() {
+            let layer_num = unsafe { &*(layer_ptr as *const CFNumber) };
+            let mut v: i64 = 0;
+            unsafe { layer_num.value(CFNumberType(4), &mut v as *mut i64 as *mut _); }
+            v
+        } else {
+            0
+        };
+        if layer != 0 {
+            continue;
+        }
+
+        // Read bounds
+        let bounds_ptr = get_val(&key_bounds);
+        if bounds_ptr.is_null() {
+            continue;
+        }
+        let (bx, by, bw, bh) = read_bounds_dict(bounds_ptr);
+
+        // Check if point is inside this window
+        if x < bx || x >= bx + bw || y < by || y >= by + bh {
+            continue;
+        }
+
+        // Point is inside this window — is it our target?
+        if wid == target_wid {
+            return Ok(true);
+        }
+
+        // Another window is on top at this point
+        let name_ptr = get_val(&key_owner);
+        let owner = if !name_ptr.is_null() {
+            let name_cf: &CFS = unsafe { &*(name_ptr as *const CFS) };
+            name_cf.to_string()
+        } else {
+            format!("(wid={})", wid)
+        };
+        eprintln!("warning: target window {window_id} is occluded at ({x:.0},{y:.0}) by \"{owner}\"");
+        return Ok(false);
+    }
+
+    Err(format!("window {window_id} not found on screen"))
+}
+
+fn read_bounds_dict(dict_ptr: *const std::ffi::c_void) -> (f64, f64, f64, f64) {
+    use std::ffi::c_void;
+    use objc2_core_foundation::{CFNumber, CFNumberType, CFString as CFS};
+
+    unsafe extern "C" {
+        fn CFDictionaryGetValue(dict: *const c_void, key: *const c_void) -> *const c_void;
+    }
+
+    let read = |key: &str| -> f64 {
+        let cf_key = CFS::from_str(key);
+        let p = unsafe { CFDictionaryGetValue(dict_ptr, &*cf_key as *const CFS as *const c_void) };
+        if p.is_null() {
+            return 0.0;
+        }
+        let num = unsafe { &*(p as *const CFNumber) };
+        let mut v: f64 = 0.0;
+        unsafe { num.value(CFNumberType(13), &mut v as *mut f64 as *mut _); }
+        v
+    };
+    (read("X"), read("Y"), read("Width"), read("Height"))
+}
+
 impl std::fmt::Debug for AXNode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AXNode")

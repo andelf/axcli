@@ -1086,9 +1086,20 @@ fn cmd_scroll_to(ctx: &ExecutionContext, locator: &str) -> Result<(), AxError> {
 fn cmd_scroll(ctx: &ExecutionContext, locator: &str, direction: &str, pixels: i32) -> Result<(), AxError> {
     let node = resolve_one(ctx, locator)?;
 
-    ctx.activate();
-
     let (cx, cy) = ctx.element_center(&node, false)?;
+
+    // Warn if target window is occluded — scroll goes to whatever is on top.
+    if let Some(wid) = node.window_id() {
+        match accessibility::is_window_visible_at(wid, cx, cy) {
+            Ok(true) => {}
+            Ok(false) => {
+                eprintln!("warning: target occluded, activating app to bring window to front");
+                ctx.activate();
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            Err(_) => {}
+        }
+    }
 
     let (dx, dy) = match direction {
         "up" => (0, pixels),
