@@ -30,7 +30,7 @@ use axcli::accessibility::{self, AXNode, attr_string};
 use axcli::actions::ExecutionContext;
 use axcli::app_kind::{self, AppKind};
 use axcli::error::{AxError, exit_code};
-use axcli::{input, screenshot, tree_fmt};
+use axcli::{input, overlay, screenshot, tree_fmt};
 
 #[derive(Parser)]
 #[command(name = "axcli", version, about = "macOS Accessibility CLI tool", long_about = "\
@@ -71,6 +71,11 @@ struct Cli {
     /// Process ID
     #[arg(long, global = true)]
     pid: Option<i32>,
+
+    /// Show a software cursor overlay during click/hover operations.
+    /// Also enabled by env var AXCLI_VISUAL_CURSOR=1.
+    #[arg(long, global = true)]
+    visual_cursor: bool,
 
     #[command(subcommand)]
     command: Command,
@@ -376,6 +381,28 @@ Known attributes:
     },
     /// List running applications visible to accessibility
     ListApps,
+    /// Global mouse control — ignores --app/--pid.
+    ///
+    /// Events are posted via `CGEventPost(HIDEventTap)`, so they land on
+    /// whichever window is topmost at the given screen coordinates.  Use
+    /// `click <LOCATOR> --strategy cg-pid` instead if you need delivery
+    /// targeted to a specific app without disturbing the front window.
+    ///
+    /// Note: posting a mouse event at (X, Y) also moves the visible cursor
+    /// to (X, Y) — that's a macOS-level behavior, not an axcli choice.
+    Mouse {
+        #[command(subcommand)]
+        action: MouseAction,
+    },
+    /// Global keyboard input — ignores --app/--pid.
+    ///
+    /// Events are posted via `CGEventPost(HIDEventTap)` and delivered to
+    /// whichever process currently holds keyboard focus (first responder).
+    /// To target a specific background app use `press <KEY> --strategy pid`.
+    Keyboard {
+        #[command(subcommand)]
+        action: KeyboardAction,
+    },
     /// Debug: print current mouse position and screen info
     #[command(hide = true, name = "debug")]
     Debug {
@@ -384,8 +411,58 @@ Known attributes:
     },
 }
 
+/// `axcli mouse ...` actions.  X/Y are screen coordinates in CG space
+/// (origin top-left, y increases downward).  Negative coordinates are
+/// common on multi-display setups (secondary monitor to the left/above).
+#[derive(Subcommand)]
+enum MouseAction {
+    /// Print the current cursor position as `x,y`.
+    Pos,
+    /// Warp the cursor to (X, Y).
+    Move {
+        #[arg(allow_hyphen_values = true)] x: f64,
+        #[arg(allow_hyphen_values = true)] y: f64,
+    },
+    /// Left click.  Omit X Y to click at the current cursor position.
+    Click {
+        #[arg(allow_hyphen_values = true)] x: Option<f64>,
+        #[arg(allow_hyphen_values = true)] y: Option<f64>,
+    },
+    /// Left double-click.  Omit X Y to click at the current cursor position.
+    Dblclick {
+        #[arg(allow_hyphen_values = true)] x: Option<f64>,
+        #[arg(allow_hyphen_values = true)] y: Option<f64>,
+    },
+    /// Scroll by DX/DY pixels.  DY > 0 scrolls up, DX > 0 scrolls left
+    /// (same sign convention as `scroll` subcommand's delta).  Omit X Y to
+    /// scroll at the current cursor position (most natural behavior — the
+    /// window under the cursor is what receives the scroll).
+    Scroll {
+        #[arg(allow_hyphen_values = true)] dx: i32,
+        #[arg(allow_hyphen_values = true)] dy: i32,
+        #[arg(allow_hyphen_values = true)] x: Option<f64>,
+        #[arg(allow_hyphen_values = true)] y: Option<f64>,
+    },
+}
+
+/// `axcli keyboard ...` actions.
+#[derive(Subcommand)]
+enum KeyboardAction {
+    /// Type literal text (Unicode via CGEventKeyboardSetUnicodeString) to
+    /// whatever app currently has keyboard focus.
+    Type { text: String },
+    /// Press a key or key combo.  Examples: `Enter`, `Command+a`,
+    /// `Control+Shift+v`, `F5`, `Escape`.  Sent to the current first
+    /// responder.
+    Press { key: String },
+}
+
 fn main() {
     let cli = Cli::parse();
+
+    if cli.visual_cursor {
+        unsafe { std::env::set_var("AXCLI_VISUAL_CURSOR", "1") };
+    }
 
     // list-apps doesn't need --app/--pid
     if matches!(cli.command, Command::ListApps) {
@@ -399,6 +476,22 @@ fn main() {
     // debug doesn't need --app/--pid
     if let Command::Debug { ref what } = cli.command {
         if let Err(e) = cmd_debug(what) {
+            eprintln!("error: {e}");
+            std::process::exit(exit_code(&e));
+        }
+        return;
+    }
+
+    // mouse / keyboard are global — ignore --app/--pid.
+    if let Command::Mouse { ref action } = cli.command {
+        if let Err(e) = cmd_mouse(action) {
+            eprintln!("error: {e}");
+            std::process::exit(exit_code(&e));
+        }
+        return;
+    }
+    if let Command::Keyboard { ref action } = cli.command {
+        if let Err(e) = cmd_keyboard(action) {
             eprintln!("error: {e}");
             std::process::exit(exit_code(&e));
         }
@@ -421,7 +514,7 @@ fn run(cli: Cli) -> Result<(), AxError> {
     let ctx = ExecutionContext::new(pid, app);
 
     match cli.command {
-        Command::ListApps => unreachable!(),
+        Command::ListApps | Command::Mouse { .. } | Command::Keyboard { .. } => unreachable!(),
         Command::Snapshot { locator, depth, all, max_text_len, simplify } => {
             cmd_snapshot(&ctx, locator.as_deref(), depth, all, max_text_len, simplify)
         }
@@ -670,6 +763,63 @@ fn cmd_debug(what: &str) -> Result<(), AxError> {
     }
 }
 
+/// Resolve optional (X, Y) — default to current cursor position when either
+/// is unspecified.  Used by `mouse click` / `dblclick` / `scroll`.
+fn mouse_point_or_cursor(x: Option<f64>, y: Option<f64>) -> (f64, f64) {
+    match (x, y) {
+        (Some(x), Some(y)) => (x, y),
+        _ => input::get_mouse_position(),
+    }
+}
+
+fn cmd_mouse(action: &MouseAction) -> Result<(), AxError> {
+    // CGEventPost requires Accessibility permission, same as other event-
+    // posting paths in axcli.
+    if !accessibility::is_trusted() {
+        return Err(AxError::AccessDenied);
+    }
+    match action {
+        MouseAction::Pos => {
+            let (x, y) = input::get_mouse_position();
+            println!("{x:.0},{y:.0}");
+        }
+        MouseAction::Move { x, y } => {
+            input::mouse_move(*x, *y);
+        }
+        MouseAction::Click { x, y } => {
+            let (cx, cy) = mouse_point_or_cursor(*x, *y);
+            input::mouse_click(cx, cy);
+        }
+        MouseAction::Dblclick { x, y } => {
+            let (cx, cy) = mouse_point_or_cursor(*x, *y);
+            input::mouse_dblclick(cx, cy);
+        }
+        MouseAction::Scroll { dx, dy, x, y } => {
+            let (cx, cy) = mouse_point_or_cursor(*x, *y);
+            input::scroll_wheel(cx, cy, *dx, *dy);
+        }
+    }
+    Ok(())
+}
+
+fn cmd_keyboard(action: &KeyboardAction) -> Result<(), AxError> {
+    if !accessibility::is_trusted() {
+        return Err(AxError::AccessDenied);
+    }
+    match action {
+        KeyboardAction::Type { text } => {
+            eprintln!("Typing: {text:?}");
+            input::type_text(text);
+        }
+        KeyboardAction::Press { key } => {
+            let (keycode, flags) = input::parse_key_combo(key);
+            eprintln!("Pressing: {key} (keycode={keycode}, flags=0x{flags:x})");
+            input::press_key_combo(keycode, flags);
+        }
+    }
+    Ok(())
+}
+
 fn cmd_snapshot(ctx: &ExecutionContext, locator: Option<&str>, depth: usize, all: bool, max_text_len: usize, simplify: bool) -> Result<(), AxError> {
     let mut printer = tree_fmt::TreePrinter::new();
     printer.max_text_len = max_text_len;
@@ -721,6 +871,13 @@ fn cmd_click(
 ) -> Result<(), AxError> {
     let node = resolve_one(ctx, locator)?;
     let role = node.role().unwrap_or_default();
+
+    // Software cursor overlay: animate to target before clicking.
+    if overlay::is_enabled() {
+        if let Ok((cx, cy)) = ctx.element_center(&node, false) {
+            overlay::animate_to_and_click(cx, cy);
+        }
+    }
 
     // --hover applies to all strategies: pre-move the cursor for visual
     // hover state.  Useful for controls that gate on mouseEntered:/`:hover`.
@@ -838,6 +995,12 @@ fn choose_auto_strategy(ctx: &ExecutionContext, node: &AXNode) -> ClickStrategy 
 fn cmd_dblclick(ctx: &ExecutionContext, locator: &str) -> Result<(), AxError> {
     let node = resolve_one(ctx, locator)?;
 
+    if overlay::is_enabled() {
+        if let Ok((cx, cy)) = ctx.element_center(&node, false) {
+            overlay::animate_to_and_click(cx, cy);
+        }
+    }
+
     ctx.activate();
 
     let (cx, cy) = ctx.element_center(&node, false)?;
@@ -898,9 +1061,12 @@ fn cmd_hover(ctx: &ExecutionContext, locator: &str) -> Result<(), AxError> {
     let node = resolve_one(ctx, locator)?;
 
     let (cx, cy) = ctx.element_center(&node, false)?;
+
+    if overlay::is_enabled() {
+        overlay::animate_to(cx, cy);
+    }
+
     eprintln!("Moving mouse to ({cx:.0}, {cy:.0})");
-    // No activate needed — CGEvent mouse move works across all screens
-    // without bringing the app to the foreground.
     input::mouse_move(cx, cy);
     Ok(())
 }

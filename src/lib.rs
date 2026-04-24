@@ -4,6 +4,7 @@ pub mod app_kind;
 pub mod error;
 pub mod input;
 pub mod locator;
+pub mod overlay;
 pub mod screen_capture;
 pub mod screenshot;
 pub mod tree_fmt;

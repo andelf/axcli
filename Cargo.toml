@@ -30,6 +30,12 @@ objc2-app-kit = { version = "0.3.2", features = [
     "NSResponder",
     "NSEvent",
     "NSGraphicsContext",
+    "NSPanel",
+    "NSWindow",
+    "NSView",
+    "NSColor",
+    "NSBezierPath",
+    "NSAnimationContext",
     "block2",
 ] }
 objc2-core-graphics = { version = "0.3.2", features = [
@@ -43,6 +49,10 @@ objc2-core-graphics = { version = "0.3.2", features = [
     "CGRemoteOperation",
     "CGError",
     "CGDirectDisplay",
+    "CGContext",
+    "CGColorSpace",
+    "CGGradient",
+    "CGPath",
     "libc",
 ] }
 objc2-application-services = { version = "0.3.2", features = [

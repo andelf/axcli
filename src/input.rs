@@ -204,11 +204,13 @@ pub fn mouse_click_bg(pid: i32, window_id: u32, screen: CGPoint, local: CGPoint)
     };
 
     if let Some(down) = make_mouse_event_via_nsevent(NSEventType::LeftMouseDown, screen, flags, wid as isize) {
+        CGEvent::set_location(Some(&down), screen);
         tag(&down, 0);
         CGEvent::post_to_pid(pid, Some(&down));
     }
     std::thread::sleep(std::time::Duration::from_millis(50));
     if let Some(up) = make_mouse_event_via_nsevent(NSEventType::LeftMouseUp, screen, flags, wid as isize) {
+        CGEvent::set_location(Some(&up), screen);
         tag(&up, 0);
         CGEvent::post_to_pid(pid, Some(&up));
     }
