@@ -988,14 +988,9 @@ fn cmd_dblclick(ctx: &ExecutionContext, locator: &str) -> Result<(), AxError> {
     let wid = match node.window_id() {
         Some(w) => w,
         None => {
-            eprintln!("debug: no CGWindowID, falling back to activate + global dblclick");
-            ctx.activate();
-            let (cx, cy) = ctx.element_center(&node, false)?;
-            eprintln!("Double-clicking at ({cx:.0}, {cy:.0})");
-            input::mouse_move(cx, cy);
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            input::mouse_dblclick(cx, cy);
-            return Ok(());
+            return Err(AxError::ActionFailed(
+                "could not find the window that owns this element".to_string(),
+            ));
         }
     };
     let (cx, cy) = ctx.element_center(&node, false)?;
