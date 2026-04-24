@@ -231,7 +231,7 @@ enum Command {
         #[arg(long)]
         activate: bool,
     },
-    /// Double-click element
+    /// Double-click element (background-safe via cg-pid)
     Dblclick {
         locator: String,
     },
@@ -985,13 +985,30 @@ fn cmd_dblclick(ctx: &ExecutionContext, locator: &str) -> Result<(), AxError> {
         }
     }
 
-    ctx.activate();
-
+    let wid = match node.window_id() {
+        Some(w) => w,
+        None => {
+            eprintln!("debug: no CGWindowID, falling back to activate + global dblclick");
+            ctx.activate();
+            let (cx, cy) = ctx.element_center(&node, false)?;
+            eprintln!("Double-clicking at ({cx:.0}, {cy:.0})");
+            input::mouse_move(cx, cy);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            input::mouse_dblclick(cx, cy);
+            return Ok(());
+        }
+    };
     let (cx, cy) = ctx.element_center(&node, false)?;
-    eprintln!("Double-clicking at ({cx:.0}, {cy:.0})");
-    input::mouse_move(cx, cy);
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    input::mouse_dblclick(cx, cy);
+    let (wx, wy) = find_owning_window(&node)
+        .and_then(|w| w.position())
+        .unwrap_or((0.0, 0.0));
+    let screen = CGPoint::new(cx, cy);
+    let local = CGPoint::new(cx - wx, cy - wy);
+    eprintln!(
+        "cg-pid dblclick pid={} wid={} screen=({cx:.0},{cy:.0}) local=({:.0},{:.0})",
+        ctx.pid, wid, local.x, local.y,
+    );
+    input::mouse_dblclick_bg(ctx.pid, wid, screen, local);
     Ok(())
 }
 

@@ -148,6 +148,7 @@ fn make_mouse_event_via_nsevent(
     screen: CGPoint,
     modifier_flags: NSEventModifierFlags,
     window_number: isize,
+    click_count: isize,
 ) -> Option<objc2::rc::Retained<CGEvent>> {
     let ns_point = NSPoint::new(screen.x, screen.y);
     let timestamp = objc2_foundation::NSProcessInfo::processInfo().systemUptime();
@@ -159,7 +160,7 @@ fn make_mouse_event_via_nsevent(
         window_number,
         None,
         next_event_number() as isize,
-        1,
+        click_count,
         1.0,
     )?;
     ns_ev.CGEvent()
@@ -203,15 +204,67 @@ pub fn mouse_click_bg(pid: i32, window_id: u32, screen: CGPoint, local: CGPoint)
         }
     };
 
-    if let Some(down) = make_mouse_event_via_nsevent(NSEventType::LeftMouseDown, screen, flags, wid as isize) {
+    if let Some(down) = make_mouse_event_via_nsevent(NSEventType::LeftMouseDown, screen, flags, wid as isize, 1) {
         CGEvent::set_location(Some(&down), screen);
         tag(&down, 0);
         CGEvent::post_to_pid(pid, Some(&down));
     }
     std::thread::sleep(std::time::Duration::from_millis(50));
-    if let Some(up) = make_mouse_event_via_nsevent(NSEventType::LeftMouseUp, screen, flags, wid as isize) {
+    if let Some(up) = make_mouse_event_via_nsevent(NSEventType::LeftMouseUp, screen, flags, wid as isize, 1) {
         CGEvent::set_location(Some(&up), screen);
         tag(&up, 0);
+        CGEvent::post_to_pid(pid, Some(&up));
+    }
+}
+
+/// Post a left-double-click to the target process via `CGEventPostToPid`,
+/// using the same SWaveAX recipe as `mouse_click_bg`.  Two down/up pairs
+/// are sent with clickCount 1 then 2.
+pub fn mouse_dblclick_bg(pid: i32, window_id: u32, screen: CGPoint, local: CGPoint) {
+    let wid = window_id as i64;
+    let set_win_loc = cg_event_set_window_location();
+    let inactive = !app_is_active(pid);
+    let flags = if inactive {
+        NSEventModifierFlags::Command
+    } else {
+        NSEventModifierFlags::empty()
+    };
+
+    let tag = |ev: &CGEvent| {
+        CGEvent::set_integer_value_field(Some(ev), CGEventField::MouseEventWindowUnderMousePointer, wid);
+        CGEvent::set_integer_value_field(
+            Some(ev),
+            CGEventField::MouseEventWindowUnderMousePointerThatCanHandleThisEvent,
+            wid,
+        );
+        CGEvent::set_integer_value_field(Some(ev), CGEventField::MouseEventSubtype, 3);
+        CGEvent::set_integer_value_field(Some(ev), CGEventField::MouseEventButtonNumber, 0);
+        if let Some(fptr) = set_win_loc {
+            unsafe { fptr(ev as *const CGEvent as *const c_void, local); }
+        }
+        CGEvent::set_location(Some(ev), screen);
+    };
+
+    // First click (clickCount=1)
+    if let Some(down) = make_mouse_event_via_nsevent(NSEventType::LeftMouseDown, screen, flags, wid as isize, 1) {
+        tag(&down);
+        CGEvent::post_to_pid(pid, Some(&down));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    if let Some(up) = make_mouse_event_via_nsevent(NSEventType::LeftMouseUp, screen, flags, wid as isize, 1) {
+        tag(&up);
+        CGEvent::post_to_pid(pid, Some(&up));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(30));
+
+    // Second click (clickCount=2)
+    if let Some(down) = make_mouse_event_via_nsevent(NSEventType::LeftMouseDown, screen, flags, wid as isize, 2) {
+        tag(&down);
+        CGEvent::post_to_pid(pid, Some(&down));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    if let Some(up) = make_mouse_event_via_nsevent(NSEventType::LeftMouseUp, screen, flags, wid as isize, 2) {
+        tag(&up);
         CGEvent::post_to_pid(pid, Some(&up));
     }
 }
