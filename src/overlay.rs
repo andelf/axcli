@@ -2,7 +2,7 @@
 //! animated cursor glyph during click/hover operations.  Purely visual; does
 //! not generate any input events.
 //!
-//! Enable via `--visual-cursor` flag or `AXCLI_VISUAL_CURSOR=1`.
+//! Enabled by default.  Disable via `--no-visual-cursor` or `AXCLI_NO_VISUAL_CURSOR=1`.
 
 use std::f64::consts::PI;
 use std::time::Instant;
@@ -35,9 +35,9 @@ const POINTER_STROKE: (f64, f64, f64, f64) = (1.0, 1.0, 1.0, 0.95);
 // ── Public API ───────────────────────────────────────────────────────────────
 
 pub fn is_enabled() -> bool {
-    match std::env::var("AXCLI_VISUAL_CURSOR") {
-        Ok(v) => !matches!(v.trim().to_lowercase().as_str(), "0" | "false" | "no" | "off"),
-        Err(_) => false,
+    match std::env::var("AXCLI_NO_VISUAL_CURSOR") {
+        Ok(v) => !matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on"),
+        Err(_) => true,
     }
 }
 

@@ -71,10 +71,10 @@ struct Cli {
     #[arg(long, global = true)]
     pid: Option<i32>,
 
-    /// Show a software cursor overlay during click/hover operations.
-    /// Also enabled by env var AXCLI_VISUAL_CURSOR=1.
+    /// Disable the software cursor overlay during click/hover operations.
+    /// Also disabled by env var AXCLI_NO_VISUAL_CURSOR=1.
     #[arg(long, global = true)]
-    visual_cursor: bool,
+    no_visual_cursor: bool,
 
     #[command(subcommand)]
     command: Command,
@@ -456,8 +456,8 @@ enum KeyboardAction {
 fn main() {
     let cli = Cli::parse();
 
-    if cli.visual_cursor {
-        unsafe { std::env::set_var("AXCLI_VISUAL_CURSOR", "1") };
+    if cli.no_visual_cursor {
+        unsafe { std::env::set_var("AXCLI_NO_VISUAL_CURSOR", "1") };
     }
 
     // list-apps doesn't need --app/--pid
