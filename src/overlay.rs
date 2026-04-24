@@ -29,8 +29,8 @@ const POINTER_OFFSET_X: f64 = 2.6;
 const POINTER_OFFSET_Y: f64 = -3.2;
 const FOG_DIAMETER: f64 = 66.0;
 
-const POINTER_FILL: (f64, f64, f64, f64) = (0.38, 0.36, 0.35, 0.98);
-const POINTER_STROKE: (f64, f64, f64, f64) = (0.90, 0.90, 0.90, 0.92);
+const POINTER_FILL: (f64, f64, f64, f64) = (0.20, 0.48, 0.95, 0.95);
+const POINTER_STROKE: (f64, f64, f64, f64) = (1.0, 1.0, 1.0, 0.95);
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
@@ -223,12 +223,11 @@ fn draw_fog(ctx: &CGContext, bounds: CGRect, pulse: f64) {
         return;
     };
 
-    // 4 color stops × 4 components (RGBA)
     let components: [CGFloat; 16] = [
-        0.38, 0.36, 0.35, 0.40 + pulse * 0.02,
-        0.43, 0.41, 0.40, 0.28 + pulse * 0.015,
-        0.46, 0.44, 0.43, 0.11,
-        0.60, 0.60, 0.60, 0.0,
+        0.20, 0.48, 0.95, 0.30 + pulse * 0.02,
+        0.25, 0.52, 0.95, 0.18 + pulse * 0.015,
+        0.30, 0.55, 0.95, 0.07,
+        0.35, 0.60, 1.00, 0.0,
     ];
     let locations: [CGFloat; 4] = [0.0, 0.50, 0.82, 1.0];
 
@@ -259,40 +258,31 @@ fn draw_fog(ctx: &CGContext, bounds: CGRect, pulse: f64) {
 }
 
 fn draw_pointer(ctx: &CGContext, bounds: CGRect, pulse: f64) {
-    let cx = bounds.size.width / 2.0 + POINTER_OFFSET_X;
-    let cy = bounds.size.height / 2.0 + POINTER_OFFSET_Y + pulse * 0.35;
-    let half = POINTER_SIZE / 2.0;
+    // Anchor: the arrow tip sits at the center of the view (adjusted by offsets).
+    // NSView coordinates: y=0 is bottom, y increases upward.
+    let tip_x = bounds.size.width / 2.0 + POINTER_OFFSET_X;
+    let tip_y = bounds.size.height / 2.0 - POINTER_OFFSET_Y;
 
-    let contour: [(f64, f64, f64); 30] = [
-        (39.0, 17.0, 21.0), (38.0, 16.0, 22.0), (37.0, 15.0, 22.0),
-        (36.0, 15.0, 23.0), (35.0, 15.0, 24.0), (34.0, 15.0, 24.0),
-        (33.0, 14.0, 25.0), (32.0, 14.0, 25.0), (31.0, 14.0, 26.0),
-        (30.0, 14.0, 27.0), (29.0, 13.0, 29.0), (28.0, 13.0, 31.0),
-        (27.0, 13.0, 34.0), (26.0, 13.0, 36.0), (25.0, 13.0, 37.0),
-        (24.0, 12.0, 37.0), (23.0, 12.0, 37.0), (22.0, 12.0, 37.0),
-        (21.0, 12.0, 37.0), (20.0, 12.0, 36.0), (19.0, 11.0, 36.0),
-        (18.0, 11.0, 34.0), (17.0, 11.0, 32.0), (16.0, 11.0, 30.0),
-        (15.0, 10.0, 27.0), (14.0, 10.0, 25.0), (13.0, 10.0, 23.0),
-        (12.0, 11.0, 21.0), (11.0, 11.0, 19.0), (10.0, 13.0, 16.0),
+    // Standard macOS-style arrow cursor, defined relative to tip (0,0).
+    // In NSView coords: tip at top, arrow body extends downward (negative y).
+    let scale = POINTER_SIZE / 19.0;
+    let raw: [(f64, f64); 7] = [
+        (0.0,   0.0),    // tip
+        (0.0, -16.5),    // left edge down
+        (3.8, -12.5),    // notch left
+        (6.5, -18.5),    // tail left
+        (8.8, -17.2),    // tail right
+        (6.0, -11.2),    // notch right
+        (11.0, -11.2),   // wing right
     ];
-    let src_min_x = 10.0_f64;
-    let src_max_x = 38.0_f64;
-    let src_min_y = 10.0_f64;
-    let src_max_y = 39.0_f64;
 
-    let map = |x: f64, y: f64| -> (f64, f64) {
-        let mx = (cx - half) + (x - src_min_x) / (src_max_x - src_min_x) * POINTER_SIZE;
-        let my = (cy - half) + (y - src_min_y) / (src_max_y - src_min_y) * POINTER_SIZE;
-        (mx, my)
-    };
+    let points: Vec<(f64, f64)> = raw
+        .iter()
+        .map(|&(x, y)| (tip_x + x * scale, tip_y + y * scale))
+        .collect();
 
-    let mut points: Vec<(f64, f64)> = Vec::with_capacity(60);
-    for &(y, min_x, _) in &contour {
-        points.push(map(min_x, y));
-    }
-    for &(y, _, max_x) in contour.iter().rev() {
-        points.push(map(max_x, y));
-    }
+    let cx = tip_x + 3.5 * scale;
+    let cy = tip_y - 9.0 * scale;
 
     CGContext::save_g_state(Some(ctx));
 
@@ -302,7 +292,6 @@ fn draw_pointer(ctx: &CGContext, bounds: CGRect, pulse: f64) {
     CGContext::scale_ctm(Some(ctx), sx, sy);
     CGContext::translate_ctm(Some(ctx), -cx, -cy);
 
-    // Build + fill
     build_pointer_path(ctx, &points);
     CGContext::set_rgb_fill_color(
         Some(ctx),
@@ -313,9 +302,8 @@ fn draw_pointer(ctx: &CGContext, bounds: CGRect, pulse: f64) {
     );
     CGContext::fill_path(Some(ctx));
 
-    // Build + stroke (fill_path consumes the path)
     build_pointer_path(ctx, &points);
-    CGContext::set_line_width(Some(ctx), 1.55);
+    CGContext::set_line_width(Some(ctx), 1.8);
     CGContext::set_line_join(Some(ctx), CGLineJoin::Round);
     CGContext::set_rgb_stroke_color(
         Some(ctx),
