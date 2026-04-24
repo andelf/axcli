@@ -50,14 +50,14 @@ Locator syntax:
   Bracket attrs: title (AXTitle, alias: name), desc (AXDescription), text (AXValue)
   text=VALUE                Exact text       e.g. text=\"Hello\"
   text~=VALUE               Contains text    e.g. text~=\"partial\"
-  text=/regex/flags         Regex text       e.g. text=/\\d+条新消息/, text=/Log\\s*in/i
+  text=/regex/flags         Regex text       e.g. text=/\\d+ unread/, text=/Log\\s*in/i
   L >> R                    Chain (scope)    e.g. .sidebar >> AXButton
   L > R                     Direct child     e.g. AXWindow > AXGroup
   L >> nth=N                Pick Nth match   e.g. .item >> nth=0, nth=-1
   L >> first / last         Pick first/last  e.g. .item >> last
 
 Pseudo-classes:
-  :has-text(\"text\")         Subtree text     e.g. .card:has-text(\"会议\")
+  :has-text(\"text\")         Subtree text     e.g. .card:has-text(\"Meeting\")
   :has(selector)            Has descendant   e.g. .item:has(.reaction)
   :visible                  Non-zero size    e.g. AXButton:visible
   :nth-child(N)             Nth child (0-based) e.g. AXGroup:nth-child(0)
@@ -159,6 +159,21 @@ enum PressStrategy {
     Pid,
 }
 
+/// Scroll dispatch strategy.
+#[derive(Clone, Debug, ValueEnum)]
+enum ScrollStrategy {
+    /// Default. Currently resolves to `cg-pid`.
+    Auto,
+    /// `CGEventPost(HIDEventTap)` — global scroll at element center.
+    /// Moves the real cursor to the target.  If the target window is
+    /// occluded, auto-activates the app to bring it to front first.
+    Cg,
+    /// `CGEventPostToPid` with MouseMoved pre-send to establish window
+    /// tracking state.  Background-safe, no focus steal, no cursor movement.
+    /// Confirmed working on Chromium/Electron apps (Lark).
+    CgPid,
+}
+
 /// Click dispatch strategy.
 #[derive(Clone, Debug, ValueEnum)]
 enum ClickStrategy {
@@ -254,7 +269,7 @@ enum Command {
     /// `--strategy pid` delivers the key to the target app's first responder
     /// via CGEventPostToPid — no activation, no focus steal.  Confirmed
     /// working on AppKit apps (Calculator, TextEdit).  See
-    /// docs/research/background-click.md 附录 A.3.
+    /// docs/research/background-click.md appendix A.3.
     Press {
         key: String,
         /// Post strategy.  `hid` (default): global `CGEventPost(HIDEventTap)`,
@@ -284,6 +299,8 @@ enum Command {
     },
     /// Scroll within an element (up/down/left/right)
     ///
+    /// Default: cg-pid (background-safe, no focus steal, no cursor movement).
+    /// Use `--strategy cg` for the legacy global path.
     /// After scrolling, lazy-loaded lists may reindex elements.
     /// Use :has-text() instead of nth= to relocate targets.
     Scroll {
@@ -294,6 +311,13 @@ enum Command {
         /// Pixels to scroll (default 300)
         #[arg(default_value = "300")]
         pixels: i32,
+        /// Scroll strategy.  `auto` (default) resolves to `cg-pid` —
+        /// background-safe, no focus steal, no cursor movement via
+        /// CGEventPostToPid.  `cg-pid` forces the same path explicitly.
+        /// `cg` uses global mouse_move + scroll_wheel (moves the real
+        /// cursor, auto-activates the app if the target window is occluded).
+        #[arg(long, value_enum, default_value_t = ScrollStrategy::Auto)]
+        strategy: ScrollStrategy,
     },
     /// Capture screenshot (background, no need to activate app)
     ///
@@ -524,8 +548,8 @@ fn run(cli: Cli) -> Result<(), AxError> {
         Command::Hover { locator } => cmd_hover(&ctx, &locator),
         Command::Focus { locator } => cmd_focus(&ctx, &locator),
         Command::ScrollTo { locator } => cmd_scroll_to(&ctx, &locator),
-        Command::Scroll { locator, direction, pixels } => {
-            cmd_scroll(&ctx, &locator, &direction, pixels)
+        Command::Scroll { locator, direction, pixels, strategy } => {
+            cmd_scroll(&ctx, &locator, &direction, pixels, &strategy)
         }
         Command::Screenshot { locator, output, ocr, legacy } => {
             cmd_screenshot(&ctx, locator.as_deref(), output.as_deref(), ocr, legacy)
@@ -1083,23 +1107,10 @@ fn cmd_scroll_to(ctx: &ExecutionContext, locator: &str) -> Result<(), AxError> {
     Ok(())
 }
 
-fn cmd_scroll(ctx: &ExecutionContext, locator: &str, direction: &str, pixels: i32) -> Result<(), AxError> {
+fn cmd_scroll(ctx: &ExecutionContext, locator: &str, direction: &str, pixels: i32, strategy: &ScrollStrategy) -> Result<(), AxError> {
     let node = resolve_one(ctx, locator)?;
 
     let (cx, cy) = ctx.element_center(&node, false)?;
-
-    // Warn if target window is occluded — scroll goes to whatever is on top.
-    if let Some(wid) = node.window_id() {
-        match accessibility::is_window_visible_at(wid, cx, cy) {
-            Ok(true) => {}
-            Ok(false) => {
-                eprintln!("warning: target occluded, activating app to bring window to front");
-                ctx.activate();
-                std::thread::sleep(std::time::Duration::from_millis(200));
-            }
-            Err(_) => {}
-        }
-    }
 
     let (dx, dy) = match direction {
         "up" => (0, pixels),
@@ -1112,7 +1123,56 @@ fn cmd_scroll(ctx: &ExecutionContext, locator: &str, direction: &str, pixels: i3
             ));
         }
     };
-    eprintln!("Scrolling {direction} {pixels}px at ({cx:.0}, {cy:.0})");
+
+    let resolved = match strategy {
+        ScrollStrategy::Auto => {
+            eprintln!("auto → cg-pid (background-safe)");
+            ScrollStrategy::CgPid
+        }
+        s => s.clone(),
+    };
+
+    match resolved {
+        ScrollStrategy::Auto => unreachable!(),
+        ScrollStrategy::CgPid => {
+            let wid = match node.window_id() {
+                Some(w) => w,
+                None => {
+                    eprintln!("warning: no window ID, falling back to global scroll");
+                    return scroll_global(ctx, cx, cy, dx, dy, direction, pixels);
+                }
+            };
+            let (wx, wy) = find_owning_window(&node)
+                .and_then(|w| w.position())
+                .unwrap_or((0.0, 0.0));
+            let screen = CGPoint::new(cx, cy);
+            let local = CGPoint::new(cx - wx, cy - wy);
+            eprintln!(
+                "cg-pid scroll {direction} {pixels}px pid={} wid={wid} screen=({cx:.0},{cy:.0})",
+                ctx.pid,
+            );
+            input::scroll_wheel_bg(ctx.pid, wid, screen, local, dx, dy);
+            Ok(())
+        }
+        ScrollStrategy::Cg => {
+            if let Some(wid) = node.window_id() {
+                match accessibility::is_window_visible_at(wid, cx, cy) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        eprintln!("warning: target occluded, activating app to bring window to front");
+                        ctx.activate();
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                    }
+                    Err(_) => {}
+                }
+            }
+            scroll_global(ctx, cx, cy, dx, dy, direction, pixels)
+        }
+    }
+}
+
+fn scroll_global(_ctx: &ExecutionContext, cx: f64, cy: f64, dx: i32, dy: i32, direction: &str, pixels: i32) -> Result<(), AxError> {
+    eprintln!("Scrolling {direction} {pixels}px at ({cx:.0}, {cy:.0}) [global]");
     input::mouse_move(cx, cy);
     std::thread::sleep(std::time::Duration::from_millis(50));
     input::scroll_wheel(cx, cy, dx, dy);
@@ -1430,7 +1490,6 @@ fn cmd_get(ctx: &ExecutionContext, attr: &GetAttr, locator: &str, all: bool) -> 
                 eprintln!("--- match {}/{} ---", i + 1, nodes.len());
             }
             print!("{val}");
-            // text 类型可能已经带换行，其他类型补一个
             if !val.ends_with('\n') {
                 println!();
             }

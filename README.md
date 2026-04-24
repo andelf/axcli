@@ -11,6 +11,14 @@ Explore, interact with, and automate any macOS application from the command line
 
 Incubated from [picc](https://github.com/andelf/picc).
 
+## Highlights
+
+- **Background-safe input.** `click`, `dblclick`, and `scroll` deliver events through `CGEventPostToPid` by default, so the target app stays in the background — no focus steal, no cursor movement. Confirmed working on AppKit *and* Chromium/Electron apps (Lark, VSCode, Chrome).
+- **Playwright-style locators.** CSS-like selectors with chaining (`>>`), pseudo-classes (`:has-text`, `:has`, `:visible`, `:nth-child`), and regex text matchers.
+- **Occlusion-proof screenshots.** ScreenCaptureKit captures the target window even when it's behind other windows; optional `--ocr` via Vision framework.
+- **Visual cursor overlay.** A small crosshair animates toward each click target for visual feedback; disable with `--no-visual-cursor`.
+- **Escape hatches.** Global `mouse` / `keyboard` subcommands for raw HID-level delivery, plus `--strategy` flags on `click`, `scroll`, and `press` to force a specific dispatch path.
+
 ## macOS Permissions
 
 axcli uses the macOS Accessibility API and ScreenCaptureKit, which require explicit user consent:
@@ -38,7 +46,7 @@ cargo install --path .
 
 ## Usage
 
-All commands require `--app <name>` or `--pid <pid>` to target an application.
+App-scoped commands require `--app <name>` or `--pid <pid>` to target an application. The `mouse`, `keyboard`, and `list-apps` subcommands are global and ignore `--app`/`--pid`.
 
 ```
 $ axcli --help
@@ -51,8 +59,8 @@ Usage: axcli [OPTIONS] <COMMAND>
 
 Commands:
   snapshot    Print accessibility tree (shows first match by default, use --all for all)
-  click       Click element
-  dblclick    Double-click element
+  click       Click element (background-safe, no focus steal)
+  dblclick    Double-click element (background-safe via cg-pid)
   input       Focus element and type text (appends to existing content)
   fill        Clear field then type text (Cmd+A, Delete, type)
   press       Press key combo (Enter, Control+a, Command+Shift+v)
@@ -64,14 +72,17 @@ Commands:
   activate    Activate (bring to foreground) the target application
   wait        Wait for element or milliseconds
   get         Get element attribute value
+  watch       Watch for accessibility notifications (daemon mode)
   list-apps   List running applications visible to accessibility
-  help        Print this message or the help of the given subcommand(s)
+  mouse       Global mouse control — ignores --app/--pid
+  keyboard    Global keyboard input — ignores --app/--pid
 
 Options:
-      --app <APP>  Application name
-      --pid <PID>  Process ID
-  -h, --help       Print help (see a summary with '-h')
-  -V, --version    Print version
+      --app <APP>           Application name
+      --pid <PID>           Process ID
+      --no-visual-cursor    Disable the software cursor overlay during click/hover
+  -h, --help                Print help (see a summary with '-h')
+  -V, --version             Print version
 ```
 
 ### Examples
@@ -84,18 +95,31 @@ axcli --app Safari snapshot --depth 5
 axcli --app Safari snapshot '.toolbar' --depth 8
 ```
 
-**Click an element:**
+**Click an element (background-safe by default):**
 
 ```sh
 axcli --app Safari click 'AXButton[title="Reload"]'
-axcli --app Lark click '.SearchButton'
+axcli --app Lark   click '.SearchButton'
+
+# Explicit strategies:
+axcli --app Safari click '.Reload' --strategy ax             # AXPress (no event posting)
+axcli --app Safari click '.Reload' --strategy cg --activate  # global click; brings app to front
+
+# Pre-move the cursor to trigger hover-gated UI:
+axcli --app Lark click '.menu-item' --hover
+```
+
+**Double-click:**
+
+```sh
+axcli --app Finder dblclick '.file-cell'
 ```
 
 **Input and fill text:**
 
 ```sh
 axcli --app Safari input '.SearchInput' 'hello world'
-axcli --app Safari fill '.SearchInput' 'replace all text'
+axcli --app Safari fill  '.SearchInput' 'replace all text'
 ```
 
 **Press keys:**
@@ -103,14 +127,19 @@ axcli --app Safari fill '.SearchInput' 'replace all text'
 ```sh
 axcli --app Safari press Enter
 axcli --app Safari press 'Command+a'
-axcli --app Safari press 'Control+Shift+v'
+
+# Deliver to a background app without stealing focus:
+axcli --app Calculator press '5' --strategy pid
 ```
 
-**Scroll:**
+**Scroll (background-safe via cg-pid):**
 
 ```sh
 axcli --app Lark scroll-to '.item'
-axcli --app Lark scroll '.chat-list' down 300
+axcli --app Lark scroll    '.chat-list' down 300
+
+# Legacy global path; auto-activates if the target window is occluded:
+axcli --app Lark scroll '.chat-list' down 300 --strategy cg
 ```
 
 **Screenshot:**
@@ -124,8 +153,8 @@ axcli --app Safari screenshot --ocr
 **Get element attributes:**
 
 ```sh
-axcli --app Safari get text '.content'
-axcli --app Safari get value '.SearchInput'
+axcli --app Safari get text    '.content'
+axcli --app Safari get value   '.SearchInput'
 axcli --app Safari get classes '.item'
 ```
 
@@ -134,6 +163,24 @@ axcli --app Safari get classes '.item'
 ```sh
 axcli --app Safari wait '.loading'     # poll until element appears
 axcli --app Safari wait 500            # sleep 500ms
+```
+
+**Watch for UI changes (daemon):**
+
+```sh
+axcli --app Lark watch
+axcli --app Lark watch --format json
+```
+
+**Global mouse / keyboard (ignores --app/--pid):**
+
+```sh
+axcli mouse pos                     # print current cursor position
+axcli mouse move 400 300
+axcli mouse click 400 300
+axcli mouse scroll 0 -120           # scroll down 120px at current cursor
+axcli keyboard type 'hello world'
+axcli keyboard press 'Command+Shift+4'
 ```
 
 **List running apps:**
@@ -147,20 +194,34 @@ axcli list-apps
 | Command | Description |
 |---|---|
 | `snapshot` | Print the accessibility tree of an app or element |
-| `click` | Click an element (AXPress action or mouse click) |
-| `dblclick` | Double-click an element |
+| `click` | Click an element — background-safe via `CGEventPostToPid` by default. Flags: `--strategy auto/ax/cg/cg-pid`, `--hover`, `--activate` |
+| `dblclick` | Double-click an element (background-safe via cg-pid) |
 | `input` | Focus element and type text (appends) |
 | `fill` | Clear field then type text (Cmd+A, Delete, type) |
-| `press` | Press a key combination |
+| `press` | Press a key combination. `--strategy hid` (default, activates) or `pid` (background) |
 | `hover` | Move mouse to element center |
 | `focus` | Focus an element |
-| `scroll-to` | Scroll an element into view |
-| `scroll` | Scroll within an element (up/down/left/right) |
-| `screenshot` | Capture a screenshot via ScreenCaptureKit |
+| `scroll-to` | Scroll an element into view (`AXScrollToVisible`) |
+| `scroll` | Scroll within an element — background-safe via cg-pid by default. `--strategy auto/cg-pid/cg` |
+| `screenshot` | Capture a screenshot via ScreenCaptureKit (occlusion-proof). `--ocr`, `--legacy` |
 | `activate` | Bring the target application to foreground |
-| `wait` | Wait for an element to appear or sleep N milliseconds |
+| `wait` | Wait for an element to appear, or sleep N milliseconds |
 | `get` | Get an element attribute (text, value, title, classes, position, size, ...) |
+| `watch` | Watch accessibility notifications in the target app. `--format text/json` |
 | `list-apps` | List running applications visible to accessibility |
+| `mouse` | Global mouse control: `pos`, `move`, `click`, `dblclick`, `scroll` |
+| `keyboard` | Global keyboard input: `type`, `press` |
+
+## Background delivery
+
+By default, `click`, `dblclick`, and `scroll` use `CGEventPostToPid` (the `cg-pid` strategy) to deliver events directly to the target process — without activating it and without moving the real cursor:
+
+- **Click** applies the SWaveAX recipe: an `NSEvent` factory event with `CGEventSetWindowLocation` and a Command-flag signal, then posted to the target pid.
+- **Scroll** pre-sends a `MouseMoved` event to update the process's "window under cursor" tracking state, then posts the scroll wheel event with the target window tags.
+
+Tested on AppKit (Calculator, TextEdit, Finder) and Chromium/Electron apps (Lark, VSCode, Chrome). If a control only responds to real hover state (menus, tooltips), add `--hover` to pre-move the cursor. If a target exposes no accessible click surface, fall back to `--strategy cg --activate` to send a global click at the element's screen coordinates.
+
+`press` defaults to the global HID path (which activates the app). Use `press <key> --strategy pid` to deliver to a background app's first responder.
 
 ## Locator Syntax
 
@@ -179,7 +240,7 @@ axcli uses a CSS-like selector syntax to target elements in the accessibility tr
 | `Role[attr$="val"]` | Ends with | `text[desc$="ago"]` |
 | `text="VALUE"` | Exact text | `text="Hello"` |
 | `text~="VALUE"` | Contains text | `text~="partial"` |
-| `text=/regex/` | Regex text | `text=/\d+条新消息/` |
+| `text=/regex/` | Regex text | `text=/\d+ unread/`, `text=/Log\s*in/i` |
 | `L >> R` | Chain (scope) | `.sidebar >> AXButton` |
 | `L > R` | Direct child | `AXWindow > AXGroup` |
 | `>> nth=N` | Nth match | `.item >> nth=0` |
@@ -188,6 +249,8 @@ axcli uses a CSS-like selector syntax to target elements in the accessibility tr
 | `:has(sel)` | Has descendant | `.item:has(.reaction)` |
 | `:visible` | Non-zero size | `AXButton:visible` |
 | `:nth-child(N)` | Nth child (0-based) | `AXGroup:nth-child(0)` |
+
+Bracket attributes `title` / `desc` / `text` map to `AXTitle` / `AXDescription` / `AXValue`. Regex flags after the trailing `/` follow Rust's `regex` crate (`i`, `m`, `s`, `x`).
 
 ## License
 

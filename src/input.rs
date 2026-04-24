@@ -431,8 +431,8 @@ pub fn press_key_combo(keycode: u16, flags: u64) {
 /// Empirically verified on macOS 14.x against Calculator and TextEdit with
 /// Finder kept frontmost — keys landed on the target's first responder
 /// without activation or focus steal.  See `docs/research/background-click.md`
-/// 附录 A.3 for data and A.4 for the architectural reason (keyboard events
-/// route via AppKit's first-responder chain and don't depend on
+/// appendix A.3 for data and A.4 for the architectural reason (keyboard
+/// events route via AppKit's first-responder chain and don't depend on
 /// WindowServer hit-testing, unlike mouse events).
 pub fn press_key_combo_bg(pid: i32, keycode: u16, flags: u64) {
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState);
@@ -470,19 +470,53 @@ pub fn scroll_wheel(x: f64, y: f64, dx: i32, dy: i32) {
     }
 }
 
-/// Scroll via `CGEventPostToPid` — background-safe, no activation.
+/// Scroll via `CGEventPostToPid` — background-safe, no activation, no cursor
+/// movement.
 ///
-/// Strategy: build a CGEvent scroll event, round-trip through
-/// `NSEvent::eventWithCGEvent` → `NSEvent::CGEvent()` to get the 12
-/// auto-filled AppKit routing fields, then tag with window ID + location.
+/// Strategy (Probe A — confirmed working on Lark/Electron 2026-04-25):
+/// 1. Send a MouseMoved event (built via NSEvent factory with full window
+///    tags) to the target pid — this updates the process's internal "window
+///    under cursor" tracking state.
+/// 2. Send a raw CGEvent scroll wheel event with window fields + location.
+///
+/// Scroll events in macOS rely on the process's cached "window under cursor"
+/// state rather than per-event routing fields.  The MouseMoved pre-send
+/// tricks AppKit into thinking the cursor is over our target window.
 pub fn scroll_wheel_bg(pid: i32, window_id: u32, screen: CGPoint, local: CGPoint, dx: i32, dy: i32) {
     let wid = window_id as i64;
     let set_win_loc = cg_event_set_window_location();
     let inactive = !app_is_active(pid);
+    let flags = if inactive {
+        NSEventModifierFlags::Command
+    } else {
+        NSEventModifierFlags::empty()
+    };
 
-    // Step 1: build raw CG scroll event
+    // Step 1: MouseMoved pre-send to establish window tracking state
+    let moved = make_mouse_event_via_nsevent(
+        NSEventType::MouseMoved, screen, flags, wid as isize, 0,
+    );
+    if let Some(ref ev) = moved {
+        CGEvent::set_location(Some(ev), screen);
+        CGEvent::set_integer_value_field(Some(ev), CGEventField::MouseEventWindowUnderMousePointer, wid);
+        CGEvent::set_integer_value_field(
+            Some(ev),
+            CGEventField::MouseEventWindowUnderMousePointerThatCanHandleThisEvent,
+            wid,
+        );
+        CGEvent::set_integer_value_field(Some(ev), CGEventField::MouseEventSubtype, 3);
+        CGEvent::set_integer_value_field(Some(ev), CGEventField::MouseEventButtonNumber, 0);
+        if let Some(fptr) = set_win_loc {
+            unsafe { fptr(&**ev as *const CGEvent as *const c_void, local); }
+        }
+        CGEvent::post_to_pid(pid, Some(ev));
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    // Step 2: scroll event with window tags
     let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState);
-    let raw = CGEvent::new_scroll_wheel_event2(
+    let scroll = CGEvent::new_scroll_wheel_event2(
         source.as_deref(),
         CGScrollEventUnit::Pixel,
         2,
@@ -490,52 +524,23 @@ pub fn scroll_wheel_bg(pid: i32, window_id: u32, screen: CGPoint, local: CGPoint
         dx,
         0,
     );
-    let Some(raw) = raw else { return };
-
-    CGEvent::set_location(Some(&raw), screen);
-
-    // Step 2: round-trip through NSEvent to fill the 12 auto fields
-    let ns = NSEvent::eventWithCGEvent(&raw);
-    let ev = ns.as_ref().and_then(|n| n.CGEvent());
-    let Some(ev) = ev else {
-        // Fallback: use raw CG event if NSEvent round-trip fails
-        CGEvent::set_integer_value_field(Some(&raw), CGEventField::MouseEventWindowUnderMousePointer, wid);
+    if let Some(ref ev) = scroll {
+        CGEvent::set_location(Some(ev), screen);
+        CGEvent::set_integer_value_field(Some(ev), CGEventField::MouseEventWindowUnderMousePointer, wid);
         CGEvent::set_integer_value_field(
-            Some(&raw),
+            Some(ev),
             CGEventField::MouseEventWindowUnderMousePointerThatCanHandleThisEvent,
             wid,
         );
+        CGEvent::set_integer_value_field(Some(ev), CGEventField(51), wid);
         if let Some(fptr) = set_win_loc {
-            unsafe { fptr(&*raw as *const CGEvent as *const c_void, local); }
+            unsafe { fptr(&**ev as *const CGEvent as *const c_void, local); }
         }
-        CGEvent::post_to_pid(pid, Some(&raw));
-        return;
-    };
-
-    // Step 3: set screen location (CG coords)
-    CGEvent::set_location(Some(&ev), screen);
-
-    // Step 4: tag window fields (91, 92 + field 51 for windowNumber)
-    CGEvent::set_integer_value_field(Some(&ev), CGEventField::MouseEventWindowUnderMousePointer, wid);
-    CGEvent::set_integer_value_field(
-        Some(&ev),
-        CGEventField::MouseEventWindowUnderMousePointerThatCanHandleThisEvent,
-        wid,
-    );
-    CGEvent::set_integer_value_field(Some(&ev), CGEventField(51), wid);
-
-    // Step 5: window-local location
-    if let Some(fptr) = set_win_loc {
-        unsafe { fptr(&*ev as *const CGEvent as *const c_void, local); }
+        if inactive {
+            CGEvent::set_flags(Some(ev), CGEventFlags(0x00100000));
+        }
+        CGEvent::post_to_pid(pid, Some(ev));
     }
-
-    // Step 6: Command flag bypass for inactive apps
-    if inactive {
-        CGEvent::set_flags(Some(&ev), CGEventFlags(0x00100000));
-    }
-
-    // Step 7: deliver
-    CGEvent::post_to_pid(pid, Some(&ev));
 }
 
 #[cfg(test)]
