@@ -1,6 +1,5 @@
 //! Detect the runtime kind of a target application: native AppKit vs.
-//! Chromium/Electron-based.  Used by the `auto` click strategy to pick a
-//! delivery path that actually reaches the target.
+//! Chromium/Electron-based.  Available for diagnostic/informational use.
 
 use std::path::PathBuf;
 
@@ -12,8 +11,6 @@ pub enum AppKind {
     /// reach `-[NSWindow sendEvent:]` and route normally.
     Native,
     /// Chromium-based: Electron, CEF, Chrome itself, Edge, Brave, Arc, etc.
-    /// Mouse events posted via `CGEventPostToPid` are filtered at the
-    /// renderer IPC boundary and don't reach Blink content.
     Chromium,
     /// Could not determine; treat as native.
     Unknown,

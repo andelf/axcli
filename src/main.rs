@@ -28,7 +28,6 @@ use objc2_core_graphics::CGImage;
 use objc2_application_services::{AXObserver, AXObserverCallback, AXUIElement, AXError as AXErr};
 use axcli::accessibility::{self, AXNode, attr_string};
 use axcli::actions::ExecutionContext;
-use axcli::app_kind::{self, AppKind};
 use axcli::error::{AxError, exit_code};
 use axcli::{input, overlay, screenshot, tree_fmt};
 
@@ -163,9 +162,9 @@ enum PressStrategy {
 /// Click dispatch strategy.
 #[derive(Clone, Debug, ValueEnum)]
 enum ClickStrategy {
-    /// Pick the most appropriate path based on element + app type.  Default.
-    /// Order: AXPress (if exposed) → cg-pid (native AppKit) → cg+activate
-    /// (Chromium/Electron and unknown).
+    /// Pick the most appropriate path based on the element.  Default.
+    /// Order: AXPress (if exposed) → cg-pid (universal fallback).
+    /// Background-safe: no focus steal, no activation.
     Auto,
     /// AXPress via the Accessibility API.  Background-safe, no focus steal.
     /// Fails if the element doesn't expose AXPress (e.g. custom canvases).
@@ -176,10 +175,10 @@ enum ClickStrategy {
     Cg,
     /// `CGEventPostToPid` with the SWaveAX recipe (NSEvent factory +
     /// `CGEventSetWindowLocation` + Command-flag signal).  Delivers the click
-    /// to the target window without activation or focus steal.  Verified on
-    /// native AppKit apps (Calculator, TextEdit).  **Does not reach Electron
-    /// / Chromium content** — Lark, VSCode, Slack etc. filter the event at
-    /// the renderer IPC boundary; use `ax` or `cg --activate` for those.
+    /// to the target window without activation or focus steal.  Works on
+    /// native AppKit apps and Chromium/Electron apps (VSCode, Chrome, Lark).
+    /// Note: some Electron apps (e.g. Lark) may self-activate after receiving
+    /// the event — that is app behavior, not a delivery failure.
     CgPid,
 }
 
@@ -207,17 +206,15 @@ enum Command {
         #[arg(long)]
         simplify: bool,
     },
-    /// Click element
+    /// Click element (background-safe, no focus steal)
     ///
-    /// Uses AXPress action, falls back to mouse click at element center.
+    /// Default: AXPress if exposed, otherwise cg-pid (CGEventPostToPid).
     /// For off-screen elements, call `scroll-to` first.
     Click {
         locator: String,
-        /// Click strategy.  `auto` (default) picks based on element + app
-        /// type: AXPress when exposed, `cg-pid` for native AppKit, `cg` with
-        /// implicit activation for Chromium/Electron.  Override with `ax` /
-        /// `cg` / `cg-pid` to force a specific path.  See
-        /// docs/research/background-click.md.
+        /// Click strategy.  `auto` (default) picks the best background-safe
+        /// path: AXPress when exposed, `cg-pid` otherwise.  Override with
+        /// `ax` / `cg` / `cg-pid` to force a specific path.
         #[arg(long, value_enum, default_value_t = ClickStrategy::Auto)]
         strategy: ClickStrategy,
         /// Move the cursor to the element center before clicking (hover
@@ -230,8 +227,7 @@ enum Command {
         /// Bring the target app to the foreground before clicking.  Required
         /// for `cg` to reliably hit the target (otherwise the click goes to
         /// whatever window is currently on top at that screen point).
-        /// `auto` uses this implicitly when falling back to `cg`.  `ax` and
-        /// `cg-pid` ignore this flag (they don't need activation).
+        /// `ax` and `cg-pid` ignore this flag (they don't need activation).
         #[arg(long)]
         activate: bool,
     },
@@ -385,8 +381,8 @@ Known attributes:
     ///
     /// Events are posted via `CGEventPost(HIDEventTap)`, so they land on
     /// whichever window is topmost at the given screen coordinates.  Use
-    /// `click <LOCATOR> --strategy cg-pid` instead if you need delivery
-    /// targeted to a specific app without disturbing the front window.
+    /// `click <LOCATOR>` instead for targeted delivery to a specific app
+    /// (defaults to background-safe cg-pid).
     ///
     /// Note: posting a mouse event at (X, Y) also moves the visible cursor
     /// to (X, Y) — that's a macOS-level behavior, not an axcli choice.
@@ -932,9 +928,7 @@ fn cmd_click(
             Ok(())
         }
         ClickStrategy::Cg => {
-            // Auto strategy implicitly activates when falling back to cg
-            // (otherwise the click goes to whatever is on top at the coords).
-            let should_activate = activate || matches!(strategy, ClickStrategy::Auto);
+            let should_activate = activate;
 
             // Menu extras (status menu icons) must not be activated — doing so
             // steals focus and dismisses the menu.  Always coord-click.
@@ -972,24 +966,14 @@ fn cmd_click(
 ///
 /// Order:
 ///   1. Element exposes AXPress → `ax` (background, no focus steal).
-///   2. App is Chromium/Electron → `cg` (the only path that reaches
-///      renderer content; will activate per cg's auto-implicit rule).
-///   3. Else (native AppKit, unknown) → `cg-pid` (background, no focus steal).
-fn choose_auto_strategy(ctx: &ExecutionContext, node: &AXNode) -> ClickStrategy {
+///   2. Everything else → `cg-pid` (background, no focus steal).
+fn choose_auto_strategy(_ctx: &ExecutionContext, node: &AXNode) -> ClickStrategy {
     if node.actions().iter().any(|a| a == "AXPress") {
         eprintln!("auto → ax (element exposes AXPress)");
         return ClickStrategy::Ax;
     }
-    match app_kind::detect(ctx.pid) {
-        AppKind::Chromium => {
-            eprintln!("auto → cg+activate (Chromium/Electron content needs renderer-side delivery)");
-            ClickStrategy::Cg
-        }
-        AppKind::Native | AppKind::Unknown => {
-            eprintln!("auto → cg-pid (native AppKit, background-safe)");
-            ClickStrategy::CgPid
-        }
-    }
+    eprintln!("auto → cg-pid (background-safe)");
+    ClickStrategy::CgPid
 }
 
 fn cmd_dblclick(ctx: &ExecutionContext, locator: &str) -> Result<(), AxError> {
