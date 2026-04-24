@@ -470,6 +470,35 @@ pub fn scroll_wheel(x: f64, y: f64, dx: i32, dy: i32) {
     }
 }
 
+/// Scroll via `CGEventPostToPid` — background-safe, no activation.
+/// Uses the same SWaveAX tag fields as mouse_click_bg so the event
+/// routes to the correct window.
+pub fn scroll_wheel_bg(pid: i32, window_id: u32, screen: CGPoint, local: CGPoint, dx: i32, dy: i32) {
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState);
+    let event = CGEvent::new_scroll_wheel_event2(
+        source.as_deref(),
+        CGScrollEventUnit::Pixel,
+        2,
+        dy,
+        dx,
+        0,
+    );
+    if let Some(ref ev) = event {
+        CGEvent::set_location(Some(ev), screen);
+        let wid = window_id as i64;
+        CGEvent::set_integer_value_field(Some(ev), CGEventField::MouseEventWindowUnderMousePointer, wid);
+        CGEvent::set_integer_value_field(
+            Some(ev),
+            CGEventField::MouseEventWindowUnderMousePointerThatCanHandleThisEvent,
+            wid,
+        );
+        if let Some(fptr) = cg_event_set_window_location() {
+            unsafe { fptr(&**ev as *const CGEvent as *const c_void, local); }
+        }
+        CGEvent::post_to_pid(pid, Some(ev));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
