@@ -162,8 +162,7 @@ enum PressStrategy {
 /// Click dispatch strategy.
 #[derive(Clone, Debug, ValueEnum)]
 enum ClickStrategy {
-    /// Pick the most appropriate path based on the element.  Default.
-    /// Order: AXPress (if exposed) → cg-pid (universal fallback).
+    /// Default: cg-pid (CGEventPostToPid).
     /// Background-safe: no focus steal, no activation.
     Auto,
     /// AXPress via the Accessibility API.  Background-safe, no focus steal.
@@ -208,13 +207,14 @@ enum Command {
     },
     /// Click element (background-safe, no focus steal)
     ///
-    /// Default: AXPress if exposed, otherwise cg-pid (CGEventPostToPid).
+    /// Default: cg-pid (CGEventPostToPid), background-safe.
+    /// Use `--strategy ax` to force AXPress instead.
     /// For off-screen elements, call `scroll-to` first.
     Click {
         locator: String,
-        /// Click strategy.  `auto` (default) picks the best background-safe
-        /// path: AXPress when exposed, `cg-pid` otherwise.  Override with
-        /// `ax` / `cg` / `cg-pid` to force a specific path.
+        /// Click strategy.  `auto` (default) uses `cg-pid` — background-safe,
+        /// no focus steal.  Override with `ax` / `cg` / `cg-pid` to force a
+        /// specific path.
         #[arg(long, value_enum, default_value_t = ClickStrategy::Auto)]
         strategy: ClickStrategy,
         /// Move the cursor to the element center before clicking (hover
@@ -964,14 +964,9 @@ fn cmd_click(
 
 /// Decide which click path to use when --strategy auto.
 ///
-/// Order:
-///   1. Element exposes AXPress → `ax` (background, no focus steal).
-///   2. Everything else → `cg-pid` (background, no focus steal).
-fn choose_auto_strategy(_ctx: &ExecutionContext, node: &AXNode) -> ClickStrategy {
-    if node.actions().iter().any(|a| a == "AXPress") {
-        eprintln!("auto → ax (element exposes AXPress)");
-        return ClickStrategy::Ax;
-    }
+/// Always cg-pid — background-safe, no focus steal, works on both
+/// native AppKit and Chromium/Electron apps.
+fn choose_auto_strategy(_ctx: &ExecutionContext, _node: &AXNode) -> ClickStrategy {
     eprintln!("auto → cg-pid (background-safe)");
     ClickStrategy::CgPid
 }
