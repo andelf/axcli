@@ -5,6 +5,7 @@
 //!   axcli --app Lark snapshot --depth 5
 //!   axcli --app Lark click '.SearchButton'
 //!   axcli --app Lark dblclick '.SearchButton'
+//!   axcli --app 东方财富 click-xy 440 150       # screen-coord click for non-AX UIs
 //!   axcli --app Lark input '.SearchInput' 'hello'
 //!   axcli --app Lark fill '.SearchInput' 'hello'
 //!   axcli --app Lark press Enter
@@ -159,6 +160,28 @@ enum PressStrategy {
     Pid,
 }
 
+/// Click-xy dispatch strategy.
+///
+/// Like `ClickStrategy` minus `Ax` — coordinate-based clicks have no AX
+/// element to call `AXPress` on.
+#[derive(Clone, Debug, ValueEnum)]
+enum ClickXyStrategy {
+    /// Default: cg-pid (CGEventPostToPid).  Background-safe, no focus steal.
+    Auto,
+    /// `CGEventPost(HIDEventTap)` at (X, Y).  Global path — the click lands
+    /// on whichever window is topmost at that screen point.  Pair with
+    /// `--activate` to bring the target to front first.  Equivalent to
+    /// `axcli mouse click X Y`.
+    Cg,
+    /// Alias for `cg` (HID event tap).
+    Hid,
+    /// `CGEventPostToPid` with the SWaveAX recipe (NSEvent factory +
+    /// `CGEventSetWindowLocation` + Command-flag signal).  Delivers the click
+    /// to the target window without activation or focus steal.  Requires
+    /// `--pid` or `--app`.
+    CgPid,
+}
+
 /// Scroll dispatch strategy.
 #[derive(Clone, Debug, ValueEnum)]
 enum ScrollStrategy {
@@ -249,6 +272,59 @@ enum Command {
     /// Double-click element (background-safe via cg-pid)
     Dblclick {
         locator: String,
+    },
+    /// Click at screen coordinates (background-safe, no AX selector needed)
+    ///
+    /// Targets self-drawn / non-AX UIs (canvases, custom-rendered controls,
+    /// proprietary financial clients, etc.) where `click <selector>` can't
+    /// reach. Default strategy is `cg-pid` — the click is delivered to the
+    /// target PID's window via `CGEventPostToPid` with no focus steal and no
+    /// cursor movement.
+    ///
+    /// Window resolution (for `cg-pid`):
+    ///   1. `--window <ID>` if provided.
+    ///   2. The visible AXWindow whose frame contains (X, Y).
+    ///   3. First visible AXWindow of the app.
+    ///
+    /// X/Y are screen coordinates in CG space (logical pixels, origin
+    /// top-left, y increases downward) — the same coordinate system used by
+    /// `cliclick`, `axcli mouse click`, and screenshots from `screencapture`
+    /// at logical resolution.
+    #[command(name = "click-xy")]
+    ClickXy {
+        #[arg(allow_hyphen_values = true)] x: f64,
+        #[arg(allow_hyphen_values = true)] y: f64,
+        /// Click strategy.  `auto` (default) → `cg-pid` (background-safe).
+        /// `cg` / `hid` → global `CGEventPost(HIDEventTap)`, equivalent to
+        /// `axcli mouse click X Y` — pair with `--activate` to ensure the
+        /// click lands on the target.
+        #[arg(long, value_enum, default_value_t = ClickXyStrategy::Auto)]
+        strategy: ClickXyStrategy,
+        /// Override window selection with an explicit CGWindowID.  Use
+        /// `axcli list-apps -v` or `CGWindowListCopyWindowInfo` to discover
+        /// IDs.  Only affects `cg-pid`.
+        #[arg(long)]
+        window: Option<u32>,
+        /// Bring the target app to the foreground before clicking.  Required
+        /// for `cg`/`hid` to reliably hit the target window when it's not
+        /// already topmost.  `cg-pid` ignores this flag (background by design).
+        #[arg(long)]
+        activate: bool,
+    },
+    /// Double-click at screen coordinates (background-safe, no AX selector)
+    ///
+    /// Same semantics as `click-xy` but emits two click pairs (clickCount 1
+    /// then 2) via `mouse_dblclick_bg` for the `cg-pid` path.
+    #[command(name = "dblclick-xy")]
+    DblclickXy {
+        #[arg(allow_hyphen_values = true)] x: f64,
+        #[arg(allow_hyphen_values = true)] y: f64,
+        #[arg(long, value_enum, default_value_t = ClickXyStrategy::Auto)]
+        strategy: ClickXyStrategy,
+        #[arg(long)]
+        window: Option<u32>,
+        #[arg(long)]
+        activate: bool,
     },
     /// Focus element and type text (appends to existing content)
     Input {
@@ -542,6 +618,12 @@ fn run(cli: Cli) -> Result<(), AxError> {
             cmd_click(&ctx, &locator, &strategy, hover, activate)
         }
         Command::Dblclick { locator } => cmd_dblclick(&ctx, &locator),
+        Command::ClickXy { x, y, strategy, window, activate } => {
+            cmd_click_xy(&ctx, x, y, &strategy, window, activate)
+        }
+        Command::DblclickXy { x, y, strategy, window, activate } => {
+            cmd_dblclick_xy(&ctx, x, y, &strategy, window, activate)
+        }
         Command::Input { locator, text } => cmd_input(&ctx, &locator, &text),
         Command::Fill { locator, text } => cmd_fill(&ctx, &locator, &text),
         Command::Press { key, strategy } => cmd_press(&ctx, &key, &strategy),
@@ -1024,6 +1106,193 @@ fn cmd_dblclick(ctx: &ExecutionContext, locator: &str) -> Result<(), AxError> {
     );
     input::mouse_dblclick_bg(ctx.pid, wid, screen, local);
     Ok(())
+}
+
+/// Resolve a window for a coordinate-based click.
+///
+/// Tries (in order):
+///   1. Explicit `--window <ID>`.
+///   2. The visible AXWindow whose frame contains (x, y).
+///   3. First visible AXWindow of the app.
+///
+/// Returns `(window_id, origin_x, origin_y)` so the caller can compute
+/// window-local coordinates.
+fn resolve_click_xy_window(
+    ctx: &ExecutionContext,
+    x: f64,
+    y: f64,
+    explicit_window: Option<u32>,
+) -> Result<(u32, f64, f64), AxError> {
+    // Enumerate AXWindow children of the app (visible, non-zero size).
+    let windows: Vec<AXNode> = ctx
+        .app
+        .children()
+        .into_iter()
+        .filter(|w| {
+            w.role().as_deref() == Some("AXWindow")
+                && w.size().map_or(false, |(w, h)| w > 0.0 && h > 0.0)
+        })
+        .collect();
+
+    if windows.is_empty() {
+        return Err(AxError::ActionFailed(format!(
+            "no visible AXWindow on pid {} — is the app running with a visible window?",
+            ctx.pid
+        )));
+    }
+
+    // 1. Explicit window ID.
+    if let Some(want) = explicit_window {
+        for w in &windows {
+            if w.window_id() == Some(want) {
+                let (wx, wy) = w.position().unwrap_or((0.0, 0.0));
+                return Ok((want, wx, wy));
+            }
+        }
+        return Err(AxError::ActionFailed(format!(
+            "window id {want} not found on pid {} (have: {:?})",
+            ctx.pid,
+            windows.iter().filter_map(|w| w.window_id()).collect::<Vec<_>>()
+        )));
+    }
+
+    // 2. Window whose frame contains (x, y).
+    for w in &windows {
+        let (wx, wy) = match w.position() {
+            Some(p) => p,
+            None => continue,
+        };
+        let (ww, wh) = match w.size() {
+            Some(s) => s,
+            None => continue,
+        };
+        if x >= wx && x < wx + ww && y >= wy && y < wy + wh {
+            if let Some(wid) = w.window_id() {
+                return Ok((wid, wx, wy));
+            }
+        }
+    }
+
+    // 3. Fall back to the first visible window.
+    let w = &windows[0];
+    let wid = w.window_id().ok_or_else(|| {
+        AxError::ActionFailed("first AXWindow has no CGWindowID".to_string())
+    })?;
+    let (wx, wy) = w.position().unwrap_or((0.0, 0.0));
+    eprintln!(
+        "warning: ({x:.0},{y:.0}) outside any window frame; falling back to first window wid={wid}"
+    );
+    Ok((wid, wx, wy))
+}
+
+fn cmd_click_xy(
+    ctx: &ExecutionContext,
+    x: f64,
+    y: f64,
+    strategy: &ClickXyStrategy,
+    window: Option<u32>,
+    activate: bool,
+) -> Result<(), AxError> {
+    // Resolve `auto` → `cg-pid`.
+    let resolved = match strategy {
+        ClickXyStrategy::Auto => ClickXyStrategy::CgPid,
+        s => s.clone(),
+    };
+
+    match resolved {
+        ClickXyStrategy::Auto => unreachable!("auto resolved above"),
+        ClickXyStrategy::CgPid => {
+            if activate {
+                eprintln!("warning: --activate is ignored for --strategy cg-pid (background by design)");
+            }
+            let (wid, wx, wy) = resolve_click_xy_window(ctx, x, y, window)?;
+
+            // Software cursor overlay (visual feedback only).
+            if overlay::is_enabled() {
+                overlay::animate_to_and_click(x, y);
+            }
+
+            let screen = CGPoint::new(x, y);
+            let local = CGPoint::new(x - wx, y - wy);
+            eprintln!(
+                "cg-pid click-xy pid={} wid={} screen=({x:.0},{y:.0}) local=({:.0},{:.0})",
+                ctx.pid, wid, local.x, local.y,
+            );
+            input::mouse_click_bg(ctx.pid, wid, screen, local);
+            Ok(())
+        }
+        ClickXyStrategy::Cg | ClickXyStrategy::Hid => {
+            if window.is_some() {
+                eprintln!("warning: --window is ignored for --strategy cg/hid (global event tap)");
+            }
+            if activate {
+                ctx.activate();
+            }
+            if overlay::is_enabled() {
+                overlay::animate_to_and_click(x, y);
+            }
+            eprintln!(
+                "cg click-xy at ({x:.0},{y:.0}){}",
+                if activate { " [activated]" } else { " [no-activate]" }
+            );
+            input::mouse_click(x, y);
+            Ok(())
+        }
+    }
+}
+
+fn cmd_dblclick_xy(
+    ctx: &ExecutionContext,
+    x: f64,
+    y: f64,
+    strategy: &ClickXyStrategy,
+    window: Option<u32>,
+    activate: bool,
+) -> Result<(), AxError> {
+    let resolved = match strategy {
+        ClickXyStrategy::Auto => ClickXyStrategy::CgPid,
+        s => s.clone(),
+    };
+
+    match resolved {
+        ClickXyStrategy::Auto => unreachable!("auto resolved above"),
+        ClickXyStrategy::CgPid => {
+            if activate {
+                eprintln!("warning: --activate is ignored for --strategy cg-pid (background by design)");
+            }
+            let (wid, wx, wy) = resolve_click_xy_window(ctx, x, y, window)?;
+
+            if overlay::is_enabled() {
+                overlay::animate_to_and_click(x, y);
+            }
+
+            let screen = CGPoint::new(x, y);
+            let local = CGPoint::new(x - wx, y - wy);
+            eprintln!(
+                "cg-pid dblclick-xy pid={} wid={} screen=({x:.0},{y:.0}) local=({:.0},{:.0})",
+                ctx.pid, wid, local.x, local.y,
+            );
+            input::mouse_dblclick_bg(ctx.pid, wid, screen, local);
+            Ok(())
+        }
+        ClickXyStrategy::Cg | ClickXyStrategy::Hid => {
+            if window.is_some() {
+                eprintln!("warning: --window is ignored for --strategy cg/hid (global event tap)");
+            }
+            if activate {
+                ctx.activate();
+            }
+            if overlay::is_enabled() {
+                overlay::animate_to_and_click(x, y);
+            }
+            eprintln!(
+                "cg dblclick-xy at ({x:.0},{y:.0}){}",
+                if activate { " [activated]" } else { " [no-activate]" }
+            );
+            input::mouse_dblclick(x, y);
+            Ok(())
+        }
+    }
 }
 
 fn cmd_input(ctx: &ExecutionContext, locator: &str, text: &str) -> Result<(), AxError> {
