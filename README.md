@@ -61,6 +61,8 @@ Commands:
   snapshot    Print accessibility tree (shows first match by default, use --all for all)
   click       Click element (background-safe, no focus steal)
   dblclick    Double-click element (background-safe via cg-pid)
+  click-xy    Click at screen coordinates (background-safe, no AX selector needed)
+  dblclick-xy Double-click at screen coordinates (background-safe, no AX selector)
   input       Focus element and type text (appends to existing content)
   fill        Clear field then type text (Cmd+A, Delete, type)
   press       Press key combo (Enter, Control+a, Command+Shift+v)
@@ -113,6 +115,25 @@ axcli --app Lark click '.menu-item' --hover
 
 ```sh
 axcli --app Finder dblclick '.file-cell'
+```
+
+**Click at screen coordinates (for self-drawn / non-AX UIs):**
+
+```sh
+# Background-safe click at logical screen (X, Y). Useful when the target UI
+# isn't exposed via the Accessibility API (custom-rendered controls, canvas-
+# based widgets, proprietary financial / trading clients, ...).  No focus
+# steal, no cursor movement.
+axcli --app 东方财富 click-xy 440 150
+
+# Pin to a specific window if the app has multiple:
+axcli --pid 92666 click-xy 440 150 --window 57484
+
+# Foreground equivalent (activates the app and goes via HID event tap):
+axcli --app 东方财富 click-xy 440 150 --strategy cg --activate
+
+# Double-click variant:
+axcli --app Finder dblclick-xy 200 300
 ```
 
 **Input and fill text:**
@@ -196,6 +217,8 @@ axcli list-apps
 | `snapshot` | Print the accessibility tree of an app or element |
 | `click` | Click an element — background-safe via `CGEventPostToPid` by default. Flags: `--strategy auto/ax/cg/cg-pid`, `--hover`, `--activate` |
 | `dblclick` | Double-click an element (background-safe via cg-pid) |
+| `click-xy` | Click at screen coordinates (X, Y) — for self-drawn / non-AX UIs. Background-safe via cg-pid; `--strategy cg/hid` for global. `--window <ID>` to pin to a specific window |
+| `dblclick-xy` | Double-click at screen coordinates (X, Y) — same model as `click-xy` |
 | `input` | Focus element and type text (appends) |
 | `fill` | Clear field then type text (Cmd+A, Delete, type) |
 | `press` | Press a key combination. `--strategy hid` (default, activates) or `pid` (background) |
@@ -220,6 +243,8 @@ By default, `click`, `dblclick`, and `scroll` use `CGEventPostToPid` (the `cg-pi
 - **Scroll** pre-sends a `MouseMoved` event to update the process's "window under cursor" tracking state, then posts the scroll wheel event with the target window tags.
 
 Tested on AppKit (Calculator, TextEdit, Finder) and Chromium/Electron apps (Lark, VSCode, Chrome). If a control only responds to real hover state (menus, tooltips), add `--hover` to pre-move the cursor. If a target exposes no accessible click surface, fall back to `--strategy cg --activate` to send a global click at the element's screen coordinates.
+
+For UIs that aren't exposed to the Accessibility API at all — custom-rendered controls, canvas widgets, proprietary financial / trading clients — use `click-xy X Y` (or `dblclick-xy`) to bypass the AX selector entirely. It applies the same SWaveAX recipe at raw screen coordinates and auto-picks the target window (or use `--window <CGWindowID>` to override). Confirmed working on AppKit apps with custom-drawn buttons that have zero AX elements (verified on 东方财富 self-drawn trade panel buttons).
 
 `press` defaults to the global HID path (which activates the app). Use `press <key> --strategy pid` to deliver to a background app's first responder.
 
