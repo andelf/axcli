@@ -344,6 +344,41 @@ pub fn type_text(text: &str) {
     }
 }
 
+/// Type text directly to a specific pid via `CGEventPostToPid`.
+///
+/// Background-safe counterpart to `type_text` — delivers Unicode keystrokes
+/// to the target process's first responder without activating the app or
+/// stealing focus.  Mirrors `press_key_combo_bg` for parameterised keys.
+///
+/// The chunk size (20 UTF-16 code units) matches `type_text`; per-chunk
+/// sleeps are the same so timing-sensitive apps see identical pacing on
+/// both paths.  Confirmed working on TextEdit's document body with the
+/// app fully occluded behind another window.  Unicode (Chinese, emoji)
+/// is supported because `CGEventKeyboardSetUnicodeString` feeds UTF-16
+/// directly, bypassing the keycode table.
+pub fn type_text_bg(pid: i32, text: &str) {
+    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState);
+    let utf16: Vec<u16> = text.encode_utf16().collect();
+    for chunk in utf16.chunks(20) {
+        let down = CGEvent::new_keyboard_event(source.as_deref(), 0, true);
+        if let Some(ref ev) = down {
+            unsafe {
+                CGEvent::keyboard_set_unicode_string(Some(ev), chunk.len() as _, chunk.as_ptr());
+            }
+            CGEvent::post_to_pid(pid, Some(ev));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let up = CGEvent::new_keyboard_event(source.as_deref(), 0, false);
+        if let Some(ref ev) = up {
+            unsafe {
+                CGEvent::keyboard_set_unicode_string(Some(ev), chunk.len() as _, chunk.as_ptr());
+            }
+            CGEvent::post_to_pid(pid, Some(ev));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 /// Parse a key combo string like "Control+a", "Command+Shift+v", "Enter"
 /// into (keycode, modifier_flags).
 pub fn parse_key_combo(combo: &str) -> (u16, u64) {

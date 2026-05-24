@@ -414,11 +414,12 @@ Known attributes:
         #[command(subcommand)]
         action: MouseAction,
     },
-    /// Global keyboard input — ignores --app/--pid.
+    /// Keyboard input.  Default path is global HID (ignores --app/--pid);
+    /// `type --strategy pid` switches to `CGEventPostToPid` and respects
+    /// --app/--pid for background delivery (no focus steal).
     ///
-    /// Events are posted via `CGEventPost(HIDEventTap)` and delivered to
-    /// whichever process currently holds keyboard focus (first responder).
-    /// To target a specific background app use `press <KEY> --strategy pid`.
+    /// For single-key presses targeting a background app, use the top-level
+    /// `press <KEY> --strategy pid` instead.
     Keyboard {
         #[command(subcommand)]
         action: KeyboardAction,
@@ -468,9 +469,25 @@ enum MouseAction {
 /// `axcli keyboard ...` actions.
 #[derive(Subcommand)]
 enum KeyboardAction {
-    /// Type literal text (Unicode via CGEventKeyboardSetUnicodeString) to
-    /// whatever app currently has keyboard focus.
-    Type { text: String },
+    /// Type literal text (Unicode via `CGEventKeyboardSetUnicodeString`).
+    ///
+    /// Default strategy `hid` posts via global `CGEventPost(HIDEventTap)`
+    /// and lands on whichever app currently owns first responder — this
+    /// usually implies the target must be foregrounded.  Strategy `pid`
+    /// posts via `CGEventPostToPid` and delivers directly to the target
+    /// process's first responder without activation or focus steal; pair
+    /// with `--app` / `--pid` to pick the target.
+    ///
+    /// Unicode (Chinese, emoji, ...) works on both paths.
+    Type {
+        text: String,
+        /// Post strategy.  `hid` (default): global `CGEventPost(HIDEventTap)`,
+        /// activates the target first.  `pid`: `CGEventPostToPid`, delivers
+        /// to the target process in the background without focus steal —
+        /// requires `--app` or `--pid` on the top-level invocation.
+        #[arg(long, value_enum, default_value_t = PressStrategy::Hid)]
+        strategy: PressStrategy,
+    },
     /// Press a key or key combo.  Examples: `Enter`, `Command+a`,
     /// `Control+Shift+v`, `F5`, `Escape`.  Sent to the current first
     /// responder.
@@ -511,7 +528,7 @@ fn main() {
         return;
     }
     if let Command::Keyboard { ref action } = cli.command {
-        if let Err(e) = cmd_keyboard(action) {
+        if let Err(e) = cmd_keyboard(&cli, action) {
             eprintln!("error: {e}");
             std::process::exit(exit_code(&e));
         }
@@ -822,15 +839,22 @@ fn cmd_mouse(action: &MouseAction) -> Result<(), AxError> {
     Ok(())
 }
 
-fn cmd_keyboard(action: &KeyboardAction) -> Result<(), AxError> {
+fn cmd_keyboard(cli: &Cli, action: &KeyboardAction) -> Result<(), AxError> {
     if !accessibility::is_trusted() {
         return Err(AxError::AccessDenied);
     }
     match action {
-        KeyboardAction::Type { text } => {
-            eprintln!("Typing: {text:?}");
-            input::type_text(text);
-        }
+        KeyboardAction::Type { text, strategy } => match strategy {
+            PressStrategy::Hid => {
+                eprintln!("Typing: {text:?} [hid]");
+                input::type_text(text);
+            }
+            PressStrategy::Pid => {
+                let (pid, _) = resolve_app(cli)?;
+                eprintln!("Typing: {text:?} [pid={pid}]");
+                input::type_text_bg(pid, text);
+            }
+        },
         KeyboardAction::Press { key } => {
             let (keycode, flags) = input::parse_key_combo(key);
             eprintln!("Pressing: {key} (keycode={keycode}, flags=0x{flags:x})");

@@ -172,15 +172,19 @@ axcli --app Lark watch
 axcli --app Lark watch --format json
 ```
 
-**Global mouse / keyboard (ignores --app/--pid):**
+**Global mouse / keyboard:**
 
 ```sh
 axcli mouse pos                     # print current cursor position
 axcli mouse move 400 300
 axcli mouse click 400 300
 axcli mouse scroll 0 -120           # scroll down 120px at current cursor
-axcli keyboard type 'hello world'
+axcli keyboard type 'hello world'   # global HID path; target must own first responder
 axcli keyboard press 'Command+Shift+4'
+
+# Type into a background app (no activation, no focus steal):
+# Unicode (Chinese, emoji, ...) works on both paths.
+axcli --app TextEdit keyboard type '你好 from background' --strategy pid
 ```
 
 **List running apps:**
@@ -222,6 +226,8 @@ By default, `click`, `dblclick`, and `scroll` use `CGEventPostToPid` (the `cg-pi
 Tested on AppKit (Calculator, TextEdit, Finder) and Chromium/Electron apps (Lark, VSCode, Chrome). If a control only responds to real hover state (menus, tooltips), add `--hover` to pre-move the cursor. If a target exposes no accessible click surface, fall back to `--strategy cg --activate` to send a global click at the element's screen coordinates.
 
 `press` defaults to the global HID path (which activates the app). Use `press <key> --strategy pid` to deliver to a background app's first responder.
+
+`keyboard type` defaults to global HID as well; use `--strategy pid --app <name>` (or `--pid <pid>`) to deliver Unicode strings to a background app without activation. Confirmed on TextEdit with Chinese / emoji input.
 
 ## Locator Syntax
 
